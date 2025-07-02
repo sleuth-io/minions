@@ -1,0 +1,76 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "coding-agent-dashboard --hook",
+            "input": {
+              "event": "PreToolUse",
+              "session_id": "{{.SessionID}}",
+              "transcript_path": "{{.TranscriptPath}}",
+              "working_dir": "{{.WorkingDir}}",
+              "tool_name": "{{.ToolName}}",
+              "tool_input": "{{.ToolInput}}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command", 
+            "command": "coding-agent-dashboard --hook",
+            "input": {
+              "event": "PostToolUse",
+              "session_id": "{{.SessionID}}",
+              "transcript_path": "{{.TranscriptPath}}",
+              "working_dir": "{{.WorkingDir}}",
+              "tool_name": "{{.ToolName}}",
+              "tool_output": "{{.ToolOutput}}"
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "coding-agent-dashboard --hook", 
+            "input": {
+              "event": "Stop",
+              "session_id": "{{.SessionID}}",
+              "transcript_path": "{{.TranscriptPath}}",
+              "working_dir": "{{.WorkingDir}}"
+            }
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "*", 
+        "hooks": [
+          {
+            "type": "command",
+            "command": "coding-agent-dashboard --hook",
+            "input": {
+              "event": "Notification",
+              "session_id": "{{.SessionID}}",
+              "transcript_path": "{{.TranscriptPath}}",
+              "working_dir": "{{.WorkingDir}}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

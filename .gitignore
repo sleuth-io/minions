@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+web-dist
+
+# Virtual environments
+.venv
+.claude/settings.local.json
+
+# Claude Code configuration (auto-generated)
+.claude_code/

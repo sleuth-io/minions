@@ -6,8 +6,128 @@
     </header>
     
     <main class="main-content">
-      <div class="add-repository">
-        <h2>Add Repository</h2>
+      <!-- Waiting Agents Section -->
+      <div class="section waiting-agents" v-if="waitingAgents.length > 0">
+        <h2>⏳ Waiting for User Input</h2>
+        <div class="waiting-list">
+          <div v-for="agent in waitingAgents" :key="agent.path" class="waiting-item">
+            <div class="waiting-info">
+              <div class="waiting-path">{{ agent.path }}</div>
+              <div class="waiting-details">
+                <span class="waiting-session">Session: {{ agent.session_id?.substring(0, 8) }}...</span>
+                <span class="waiting-time">{{ formatTimeSince(agent.last_activity) }}</span>
+              </div>
+              <div 
+                v-if="agent.last_message" 
+                class="waiting-message"
+                @click="toggleMessageExpansion(agent.path)"
+                :title="agent.full_last_message ? 'Click to expand' : ''"
+              >
+                {{ agent.last_message }}
+              </div>
+              <div 
+                v-if="expandedMessages[agent.path] && agent.full_last_message" 
+                class="expanded-message"
+              >
+                {{ agent.full_last_message }}
+              </div>
+            </div>
+            <div class="waiting-actions">
+              <button @click="openInPyCharm(agent.path)" class="open-btn">
+                Open in PyCharm
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div v-if="loading" class="loading">
+        <p>Loading...</p>
+      </div>
+
+      <!-- Error state -->
+      <div v-if="error" class="error-message">
+        <p>{{ error }}</p>
+        <button @click="loadRepositories" class="retry-btn">Retry</button>
+      </div>
+
+      <!-- Repositories Section -->
+      <div class="section repositories" v-if="!loading && repositories.length > 0">
+        <h2>📁 Repositories</h2>
+        <div v-for="repo in repositories" :key="repo.id" class="repository-card">
+          <div class="repo-header">
+            <div class="repo-info">
+              <h3>{{ repo.name || repo.path }}</h3>
+              <span class="repo-path" v-if="repo.name">{{ repo.path }}</span>
+            </div>
+            <div class="repo-actions">
+              <div class="hook-status">
+                <span 
+                  v-if="getHookStatus(repo.path).is_installed" 
+                  class="hook-indicator installed"
+                  title="Claude Code hooks are installed"
+                >
+                  🪝 Hooks Installed
+                </span>
+                <div v-else class="hook-not-installed">
+                  <span class="hook-indicator not-installed" title="Claude Code hooks not installed">
+                    🚫 No Hooks
+                  </span>
+                  <button 
+                    @click="installHook(repo.path)"
+                    :disabled="hookLoading[repo.path]"
+                    class="install-hook-btn"
+                    title="Install Claude Code hooks for this repository"
+                  >
+                    {{ hookLoading[repo.path] ? 'Installing...' : 'Install Hooks' }}
+                  </button>
+                </div>
+              </div>
+              <button @click="removeRepository(repo.id)" class="remove-btn">×</button>
+            </div>
+          </div>
+          
+          <div class="worktrees" v-if="repo.worktrees && repo.worktrees.length > 0">
+            <div v-for="worktree in repo.worktrees" :key="worktree.path" class="worktree-item">
+              <div class="worktree-info">
+                <span class="branch-name">{{ worktree.branch }}</span>
+                <span class="worktree-path">{{ worktree.path }}</span>
+                <span :class="['status', getWorktreeStatus(worktree)]">{{ getWorktreeStatus(worktree) }}</span>
+                <span 
+                  v-if="getWorktreeLastMessage(worktree)" 
+                  class="last-message"
+                  @click="toggleMessageExpansion(worktree.path)"
+                  :title="getWorktreeFullLastMessage(worktree) ? 'Click to expand' : ''"
+                >
+                  {{ getWorktreeLastMessage(worktree) }}
+                </span>
+                <div 
+                  v-if="expandedMessages[worktree.path] && getWorktreeFullLastMessage(worktree)" 
+                  class="expanded-message"
+                >
+                  {{ getWorktreeFullLastMessage(worktree) }}
+                </div>
+              </div>
+              <button @click="openInPyCharm(worktree.path)" class="open-btn">
+                Open in PyCharm
+              </button>
+            </div>
+          </div>
+          
+          <div v-else class="no-worktrees">
+            <p>No worktrees found for this repository</p>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="!loading" class="empty-state">
+        <p>No repositories configured. Add a repository to get started.</p>
+      </div>
+
+      <!-- Add Repository Section -->
+      <div class="section add-repository">
+        <h2>➕ Add Repository</h2>
         <div class="input-container">
           <div class="path-input-group">
             <input 
@@ -64,75 +184,6 @@
           </div>
         </div>
       </div>
-
-      <!-- Loading state -->
-      <div v-if="loading" class="loading">
-        <p>Loading...</p>
-      </div>
-
-      <!-- Error state -->
-      <div v-if="error" class="error-message">
-        <p>{{ error }}</p>
-        <button @click="loadRepositories" class="retry-btn">Retry</button>
-      </div>
-
-      <div class="repositories" v-if="!loading && repositories.length > 0">
-        <h2>Repositories</h2>
-        <div v-for="repo in repositories" :key="repo.id" class="repository-card">
-          <div class="repo-header">
-            <div class="repo-info">
-              <h3>{{ repo.name || repo.path }}</h3>
-              <span class="repo-path" v-if="repo.name">{{ repo.path }}</span>
-            </div>
-            <div class="repo-actions">
-              <div class="hook-status">
-                <span 
-                  v-if="getHookStatus(repo.path).is_installed" 
-                  class="hook-indicator installed"
-                  title="Claude Code hooks are installed"
-                >
-                  🪝 Hooks Installed
-                </span>
-                <div v-else class="hook-not-installed">
-                  <span class="hook-indicator not-installed" title="Claude Code hooks not installed">
-                    🚫 No Hooks
-                  </span>
-                  <button 
-                    @click="installHook(repo.path)"
-                    :disabled="hookLoading[repo.path]"
-                    class="install-hook-btn"
-                    title="Install Claude Code hooks for this repository"
-                  >
-                    {{ hookLoading[repo.path] ? 'Installing...' : 'Install Hooks' }}
-                  </button>
-                </div>
-              </div>
-              <button @click="removeRepository(repo.id)" class="remove-btn">×</button>
-            </div>
-          </div>
-          
-          <div class="worktrees" v-if="repo.worktrees && repo.worktrees.length > 0">
-            <div v-for="worktree in repo.worktrees" :key="worktree.path" class="worktree-item">
-              <div class="worktree-info">
-                <span class="branch-name">{{ worktree.branch }}</span>
-                <span class="worktree-path">{{ worktree.path }}</span>
-                <span :class="['status', getWorktreeStatus(worktree)]">{{ getWorktreeStatus(worktree) }}</span>
-              </div>
-              <button @click="openInPyCharm(worktree.path)" class="open-btn">
-                Open in PyCharm
-              </button>
-            </div>
-          </div>
-          
-          <div v-else class="no-worktrees">
-            <p>No worktrees found for this repository</p>
-          </div>
-        </div>
-      </div>
-
-      <div v-else-if="!loading" class="empty-state">
-        <p>No repositories configured. Add a repository to get started.</p>
-      </div>
     </main>
   </div>
 </template>
@@ -153,13 +204,18 @@ export default {
       directorySuggestions: [],
       suggestionLoading: false,
       hookStatuses: {},
-      hookLoading: {}
+      hookLoading: {},
+      expandedMessages: {}
     }
   },
   async mounted() {
     await this.loadRepositories()
     this.loadPathHistory()
     await this.loadHookStatuses()
+    this.setupSSE()
+  },
+  beforeUnmount() {
+    apiClient.disconnectSSE()
   },
   computed: {
     localSuggestions() {
@@ -176,6 +232,24 @@ export default {
       })
       
       return suggestions
+    },
+
+    waitingAgents() {
+      const waiting = []
+      if (!this.repositories) return waiting
+      
+      for (const repo of this.repositories) {
+        if (repo.status) {
+          for (const status of repo.status) {
+            if (status.status === 'waiting') {
+              waiting.push(status)
+            }
+          }
+        }
+      }
+      
+      // Sort by most recent activity
+      return waiting.sort((a, b) => new Date(b.last_activity) - new Date(a.last_activity))
     }
   },
   methods: {
@@ -289,13 +363,12 @@ export default {
     async openInPyCharm(path) {
       try {
         const response = await apiClient.openInIDE(path)
-        if (response.url) {
-          window.open(response.url, '_blank')
+        if (response.status === 'opened') {
+          console.log('PyCharm opened successfully for:', path)
         }
       } catch (error) {
         console.error('Failed to open in PyCharm:', error)
-        // Fallback to direct URL opening
-        window.open(`pycharm://open?file=${encodeURIComponent(path)}`, '_blank')
+        alert(`Failed to open PyCharm: ${error.message}`)
       }
     },
     
@@ -313,6 +386,61 @@ export default {
       }
       
       return 'unknown'
+    },
+    
+    getWorktreeLastMessage(worktree) {
+      // Find last message for this worktree from the repository's status array
+      if (!this.repositories) return ''
+      
+      const repo = this.repositories.find(r => 
+        r.worktrees && r.worktrees.some(wt => wt.path === worktree.path)
+      )
+      
+      if (repo && repo.status) {
+        const status = repo.status.find(s => s.path === worktree.path)
+        return status ? status.last_message || '' : ''
+      }
+      
+      return ''
+    },
+
+    getWorktreeFullLastMessage(worktree) {
+      // Find full last message for this worktree from the repository's status array
+      if (!this.repositories) return ''
+      
+      const repo = this.repositories.find(r => 
+        r.worktrees && r.worktrees.some(wt => wt.path === worktree.path)
+      )
+      
+      if (repo && repo.status) {
+        const status = repo.status.find(s => s.path === worktree.path)
+        return status ? status.full_last_message || '' : ''
+      }
+      
+      return ''
+    },
+
+    toggleMessageExpansion(worktreePath) {
+      this.expandedMessages = {
+        ...this.expandedMessages,
+        [worktreePath]: !this.expandedMessages[worktreePath]
+      }
+    },
+
+    formatTimeSince(timestamp) {
+      if (!timestamp) return ''
+      
+      const now = new Date()
+      const time = new Date(timestamp)
+      const diffMs = now - time
+      const diffMins = Math.floor(diffMs / 60000)
+      const diffHours = Math.floor(diffMins / 60)
+      const diffDays = Math.floor(diffHours / 24)
+      
+      if (diffMins < 1) return 'just now'
+      if (diffMins < 60) return `${diffMins}m ago`
+      if (diffHours < 24) return `${diffHours}h ago`
+      return `${diffDays}d ago`
     },
     
     async loadHookStatuses() {
@@ -354,6 +482,43 @@ export default {
     
     getHookStatus(repoPath) {
       return this.hookStatuses[repoPath] || { is_installed: false }
+    },
+    
+    setupSSE() {
+      // Connect to Server-Sent Events
+      apiClient.connectSSE()
+      
+      // Listen for status updates
+      apiClient.onSSEMessage('status_update', (statusData) => {
+        console.log('Received status update:', statusData)
+        // Update repository status in place without full reload
+        this.updateRepositoryStatuses(statusData)
+      })
+    },
+    
+    updateRepositoryStatuses(newStatuses) {
+      // Update the status data for each repository
+      this.repositories = this.repositories.map(repo => {
+        if (repo.status) {
+          // Update existing status entries
+          const updatedStatus = repo.status.map(status => {
+            const newStatus = newStatuses.find(ns => ns.path === status.path)
+            return newStatus || status
+          })
+          
+          // Add any new status entries for this repo's paths
+          const repoWorktreePaths = repo.worktrees ? repo.worktrees.map(wt => wt.path) : []
+          newStatuses.forEach(newStatus => {
+            if (repoWorktreePaths.includes(newStatus.path) && 
+                !updatedStatus.find(s => s.path === newStatus.path)) {
+              updatedStatus.push(newStatus)
+            }
+          })
+          
+          return { ...repo, status: updatedStatus }
+        }
+        return repo
+      })
     }
   }
 }
@@ -395,12 +560,87 @@ export default {
   padding: 0 2rem;
 }
 
-.add-repository {
+.section {
   background: white;
   padding: 2rem;
   border-radius: 8px;
   margin-bottom: 2rem;
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.waiting-agents {
+  border-left: 4px solid #007bff;
+}
+
+.waiting-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.waiting-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #f8f9fa;
+}
+
+.waiting-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.waiting-path {
+  font-weight: bold;
+  font-family: monospace;
+  color: #333;
+  font-size: 1.1rem;
+}
+
+.waiting-details {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.waiting-session {
+  font-family: monospace;
+  background: #e9ecef;
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
+}
+
+.waiting-time {
+  color: #007bff;
+  font-weight: 500;
+}
+
+.waiting-message {
+  font-family: monospace;
+  color: #495057;
+  font-size: 0.9rem;
+  background: #fff;
+  padding: 0.5rem;
+  border-radius: 4px;
+  max-width: 500px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  border-left: 3px solid #007bff;
+}
+
+.waiting-message:hover {
+  background: #f1f3f4;
+}
+
+.waiting-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .add-repository h2 {
@@ -581,6 +821,11 @@ export default {
   color: #155724;
 }
 
+.status.waiting {
+  background: #cce5ff;
+  color: #004085;
+}
+
 .status.idle {
   background: #fff3cd;
   color: #856404;
@@ -594,6 +839,39 @@ export default {
 .status.unknown {
   background: #e9ecef;
   color: #6c757d;
+}
+
+.last-message {
+  font-family: monospace;
+  color: #495057;
+  font-size: 0.8rem;
+  background: #f8f9fa;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.last-message:hover {
+  background: #e9ecef;
+}
+
+.expanded-message {
+  font-family: monospace;
+  color: #495057;
+  font-size: 0.8rem;
+  background: #f1f3f4;
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-width: 500px;
+  border-left: 3px solid #007bff;
 }
 
 .open-btn {

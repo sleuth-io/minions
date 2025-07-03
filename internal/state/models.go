@@ -17,10 +17,14 @@ type Worktree struct {
 }
 
 type AgentStatus struct {
-	Path         string    `json:"path"`
-	Status       string    `json:"status"` // running, idle, paused, error
-	LastActivity time.Time `json:"last_activity"`
-	PID          int       `json:"pid,omitempty"`
+	Path            string    `json:"path"`
+	Status          string    `json:"status"` // running, idle, paused, error
+	LastActivity    time.Time `json:"last_activity"`
+	PID             int       `json:"pid,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	TranscriptPath  string    `json:"transcript_path,omitempty"`
+	LastMessage     string    `json:"last_message,omitempty"`
+	FullLastMessage string    `json:"full_last_message,omitempty"`
 }
 
 type RepositoryWithWorktrees struct {

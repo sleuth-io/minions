@@ -13,6 +13,7 @@ all: build
 # Clean build artifacts
 .PHONY: clean
 clean:
+	rm -rf build/
 	rm -rf dist/
 	rm -rf web-dist/
 	rm -f $(APP_NAME)
@@ -42,7 +43,8 @@ build-frontend:
 # Build for current platform
 .PHONY: build
 build: build-frontend
-	go build $(LDFLAGS) -o $(APP_NAME) .
+	mkdir -p build
+	go build $(LDFLAGS) -o build/$(APP_NAME) .
 
 # Cross-platform builds
 .PHONY: build-all
@@ -75,7 +77,7 @@ dev-frontend:
 # Run the built application
 .PHONY: run
 run: build
-	./$(APP_NAME)
+	./build/$(APP_NAME)
 
 # Test targets
 .PHONY: test

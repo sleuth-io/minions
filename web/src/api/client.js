@@ -1,6 +1,11 @@
 class ApiClient {
   constructor(baseURL = '/api') {
     this.baseURL = baseURL
+    this.eventSource = null
+    this.listeners = new Map()
+    this.reconnectAttempts = 0
+    this.maxReconnectAttempts = 5
+    this.reconnectInterval = 1000
   }
 
   async request(endpoint, options = {}) {
@@ -87,6 +92,91 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(data)
     })
+  }
+
+  // Server-Sent Events methods
+  connectSSE() {
+    if (this.eventSource && this.eventSource.readyState === EventSource.OPEN) {
+      return
+    }
+
+    const sseUrl = '/events'
+    
+    try {
+      this.eventSource = new EventSource(sseUrl)
+      
+      this.eventSource.onopen = () => {
+        console.log('SSE connected')
+        this.reconnectAttempts = 0
+      }
+      
+      this.eventSource.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data)
+          this.handleSSEMessage(message)
+        } catch (error) {
+          console.error('Failed to parse SSE message:', error)
+        }
+      }
+      
+      this.eventSource.onerror = (error) => {
+        console.error('SSE error:', error)
+        this.eventSource.close()
+        this.attemptReconnect()
+      }
+    } catch (error) {
+      console.error('Failed to create SSE connection:', error)
+      this.attemptReconnect()
+    }
+  }
+
+  handleSSEMessage(message) {
+    const listeners = this.listeners.get(message.type) || []
+    listeners.forEach(callback => {
+      try {
+        callback(message.data)
+      } catch (error) {
+        console.error('SSE listener error:', error)
+      }
+    })
+  }
+
+  attemptReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.log('Max reconnect attempts reached')
+      return
+    }
+
+    this.reconnectAttempts++
+    const delay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1)
+    
+    setTimeout(() => {
+      console.log(`Attempting to reconnect SSE (attempt ${this.reconnectAttempts})`)
+      this.connectSSE()
+    }, delay)
+  }
+
+  onSSEMessage(type, callback) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, [])
+    }
+    this.listeners.get(type).push(callback)
+    
+    // Return unsubscribe function
+    return () => {
+      const listeners = this.listeners.get(type) || []
+      const index = listeners.indexOf(callback)
+      if (index > -1) {
+        listeners.splice(index, 1)
+      }
+    }
+  }
+
+  disconnectSSE() {
+    if (this.eventSource) {
+      this.eventSource.close()
+      this.eventSource = null
+    }
   }
 }
 

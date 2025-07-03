@@ -1,21 +1,50 @@
 package state
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
+type StatusChangeCallback func()
+
+type FileWatcher struct {
+	statusFile string
+	manager    *Manager
+	stopCh     chan bool
+}
+
 type Manager struct {
-	configDir string
+	configDir        string
+	changeCallbacks  []StatusChangeCallback
+	fileWatcher      *FileWatcher
 }
 
 func NewManager(configDir string) (*Manager, error) {
-	return &Manager{
-		configDir: configDir,
-	}, nil
+	manager := &Manager{
+		configDir:       configDir,
+		changeCallbacks: make([]StatusChangeCallback, 0),
+	}
+	
+	// Set up file watcher for agent status file
+	statusFile := filepath.Join(configDir, "agent-status.json")
+	fileWatcher := &FileWatcher{
+		statusFile: statusFile,
+		manager:    manager,
+		stopCh:     make(chan bool),
+	}
+	manager.fileWatcher = fileWatcher
+	
+	// Start file watching in a goroutine
+	go fileWatcher.start()
+	
+	return manager, nil
 }
 
 func (m *Manager) GetRepositories() ([]Repository, error) {
@@ -135,6 +164,22 @@ func (m *Manager) GetAgentStatus() ([]AgentStatus, error) {
 	return statuses, nil
 }
 
+func (m *Manager) AddStatusChangeCallback(callback StatusChangeCallback) {
+	m.changeCallbacks = append(m.changeCallbacks, callback)
+}
+
+func (m *Manager) Close() {
+	if m.fileWatcher != nil {
+		m.fileWatcher.stop()
+	}
+}
+
+func (m *Manager) notifyStatusChange() {
+	for _, callback := range m.changeCallbacks {
+		callback()
+	}
+}
+
 func (m *Manager) SaveAgentStatus(statuses []AgentStatus) error {
 	statusFile := filepath.Join(m.configDir, "agent-status.json")
 	
@@ -147,5 +192,207 @@ func (m *Manager) SaveAgentStatus(statuses []AgentStatus) error {
 		return fmt.Errorf("failed to write agent status file: %w", err)
 	}
 	
+	// Notify callbacks that status has changed
+	m.notifyStatusChange()
+	
 	return nil
+}
+
+func (m *Manager) GetLastTranscriptMessage(transcriptPath string) (string, error) {
+	if transcriptPath == "" {
+		return "", nil
+	}
+	
+	file, err := os.Open(transcriptPath)
+	if err != nil {
+		return "", nil // File might not exist yet
+	}
+	defer file.Close()
+	
+	var lastUserMessage string
+	var lastAssistantMessage string
+	scanner := bufio.NewScanner(file)
+	
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue // Skip malformed lines
+		}
+		
+		// Only process role-based messages (actual conversation content)
+		if role, ok := entry["role"].(string); ok {
+			if content, ok := entry["content"].(string); ok && content != "" {
+				// Skip system messages and other non-conversation content
+				if role == "system" {
+					continue
+				}
+				
+				// Clean up content by removing tool call blocks
+				cleanContent := m.cleanMessageContent(content)
+				if cleanContent != "" && !m.isSystemOutput(cleanContent) {
+					if role == "assistant" {
+						lastAssistantMessage = cleanContent
+					} else if role == "user" {
+						lastUserMessage = cleanContent
+					}
+				}
+			}
+		}
+		// Skip non-role-based entries as they're likely system/hook output
+	}
+	
+	// Prefer assistant messages (responses to user) over user messages
+	result := lastAssistantMessage
+	if result == "" {
+		result = lastUserMessage
+	}
+	
+	// Truncate if too long
+	if len(result) > 200 {
+		result = result[:200] + "..."
+	}
+	
+	return result, nil
+}
+
+func (m *Manager) cleanMessageContent(content string) string {
+	// Remove tool call blocks like <function_calls>...</function_calls>
+	toolCallRegex := regexp.MustCompile(`(?s)<function_calls>.*?</function_calls>`)
+	content = toolCallRegex.ReplaceAllString(content, "")
+	
+	// Remove empty lines and trim
+	lines := strings.Split(content, "\n")
+	var cleanLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			cleanLines = append(cleanLines, trimmed)
+		}
+	}
+	
+	result := strings.Join(cleanLines, " ")
+	return strings.TrimSpace(result)
+}
+
+func (m *Manager) isSystemOutput(content string) bool {
+	// Check for patterns that indicate system/hook output rather than conversation
+	systemPatterns := []string{
+		"Config directory:",
+		"Updated agent status:",
+		"completed successfully:",
+		"[1m", // ANSI color codes
+		"[/home/", // Path patterns in system output
+		"--hook",
+		"Stop [",
+		"___go_build_",
+	}
+	
+	contentLower := strings.ToLower(content)
+	for _, pattern := range systemPatterns {
+		if strings.Contains(contentLower, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// UpdateAgentLastMessage is deprecated - messages are now extracted directly in hook mode
+func (m *Manager) UpdateAgentLastMessage(path, sessionID string) error {
+	// This function is kept for backward compatibility but is no longer used
+	// Messages are now extracted and stored directly in the hook handler
+	return nil
+}
+
+func (m *Manager) GetLastTranscriptMessageFull(transcriptPath string) (string, error) {
+	if transcriptPath == "" {
+		return "", nil
+	}
+	
+	file, err := os.Open(transcriptPath)
+	if err != nil {
+		return "", nil // File might not exist yet
+	}
+	defer file.Close()
+	
+	var lastUserMessage string
+	var lastAssistantMessage string
+	scanner := bufio.NewScanner(file)
+	
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue // Skip malformed lines
+		}
+		
+		// Only process role-based messages (actual conversation content)
+		if role, ok := entry["role"].(string); ok {
+			if content, ok := entry["content"].(string); ok && content != "" {
+				// Skip system messages and other non-conversation content
+				if role == "system" {
+					continue
+				}
+				
+				// Clean up content by removing tool call blocks but keep full length
+				cleanContent := m.cleanMessageContent(content)
+				if cleanContent != "" && !m.isSystemOutput(cleanContent) {
+					if role == "assistant" {
+						lastAssistantMessage = cleanContent
+					} else if role == "user" {
+						lastUserMessage = cleanContent
+					}
+				}
+			}
+		}
+		// Skip non-role-based entries as they're likely system/hook output
+	}
+	
+	// Prefer assistant messages (responses to user) over user messages
+	result := lastAssistantMessage
+	if result == "" {
+		result = lastUserMessage
+	}
+	
+	return result, nil
+}
+
+func (w *FileWatcher) start() {
+	var lastModTime time.Time
+	
+	// Get initial modification time
+	if stat, err := os.Stat(w.statusFile); err == nil {
+		lastModTime = stat.ModTime()
+	}
+	
+	ticker := time.NewTicker(1 * time.Second) // Check every second
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			if stat, err := os.Stat(w.statusFile); err == nil {
+				if stat.ModTime().After(lastModTime) {
+					lastModTime = stat.ModTime()
+					log.Printf("Agent status file changed, notifying callbacks")
+					w.manager.notifyStatusChange()
+				}
+			}
+		}
+	}
+}
+
+func (w *FileWatcher) stop() {
+	close(w.stopCh)
 }

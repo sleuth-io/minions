@@ -30,6 +30,11 @@
                 class="expanded-message"
               >
                 {{ agent.full_last_message }}
+                <div class="message-actions">
+                  <button @click="sendMinionMessage(agent.path, 'hi')" class="action-btn">
+                    Hi
+                  </button>
+                </div>
               </div>
             </div>
             <div class="waiting-actions">
@@ -107,6 +112,11 @@
                   class="expanded-message"
                 >
                   {{ getWorktreeFullLastMessage(worktree) }}
+                  <div class="message-actions">
+                    <button @click="sendMinionMessage(worktree.path, 'hi')" class="action-btn">
+                      Hi
+                    </button>
+                  </div>
                 </div>
               </div>
               <button @click="openInPyCharm(worktree.path)" class="open-btn">
@@ -424,6 +434,29 @@ export default {
       this.expandedMessages = {
         ...this.expandedMessages,
         [worktreePath]: !this.expandedMessages[worktreePath]
+      }
+    },
+
+    async sendMinionMessage(path, message) {
+      try {
+        const response = await fetch('/api/minion/message', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            path: path,
+            message: message
+          })
+        })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+        
+        console.log(`Sent message "${message}" to minion at ${path}`)
+      } catch (error) {
+        console.error('Failed to send minion message:', error)
       }
     },
 
@@ -872,6 +905,27 @@ export default {
   word-wrap: break-word;
   max-width: 500px;
   border-left: 3px solid #007bff;
+}
+
+.message-actions {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #dee2e6;
+}
+
+.action-btn {
+  padding: 0.25rem 0.5rem;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.action-btn:hover {
+  background: #0056b3;
 }
 
 .open-btn {

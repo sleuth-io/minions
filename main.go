@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/creack/pty"
+	"golang.org/x/term"
 
 	"coding-agent-dashboard/internal/api"
 	"coding-agent-dashboard/internal/config"
@@ -18,12 +24,22 @@ import (
 )
 
 var (
-	hookMode = flag.Bool("hook", false, "Run in hook mode (no web UI)")
-	port     = flag.String("port", "8030", "Port to run the web server on")
+	hookMode   = flag.Bool("hook", false, "Run in hook mode (no web UI)")
+	minionMode = flag.Bool("minion", false, "Run in minion mode (execute command transparently)")
+	port       = flag.String("port", "8030", "Port to run the web server on")
 )
 
 func main() {
 	flag.Parse()
+
+	if *minionMode {
+		// Minion mode - execute command transparently and exit
+		if err := handleMinionMode(); err != nil {
+			log.Printf("Minion mode error: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Initialize config directories
 	configDir, err := config.GetConfigDir()
@@ -382,4 +398,277 @@ func shouldIgnoreStop(stateManager *state.Manager, workingDir string) bool {
 	}
 	
 	return false
+}
+
+func handleMinionMode() error {
+	// Create debug log file for minion mode
+	debugFile, err := os.OpenFile("/tmp/minion-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer debugFile.Close()
+		log.SetOutput(debugFile)
+	} else {
+		// Fallback to discard if debug file can't be created
+		log.SetOutput(io.Discard)
+	}
+	
+	// Get command arguments (everything after the --minion flag)
+	args := flag.Args()
+	if len(args) == 0 {
+		return fmt.Errorf("minion mode requires at least one command argument")
+	}
+
+	// Get current working directory to identify this minion
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	// Initialize config directory and state manager for message watching
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return fmt.Errorf("failed to get config directory: %w", err)
+	}
+
+	stateManager, err := state.NewManager(configDir)
+	if err != nil {
+		return fmt.Errorf("failed to initialize state manager: %w", err)
+	}
+	defer stateManager.Close()
+
+	// Create command with the first argument as the command and rest as args
+	cmd := exec.Command(args[0], args[1:]...)
+
+	// Check if stdin is available (not a terminal or has data)
+	stat, err := os.Stdin.Stat()
+	stdinIsTerminal := err != nil || (stat.Mode()&os.ModeCharDevice) != 0
+	
+	var stdinPipe io.WriteCloser
+	var ptyMaster *os.File
+	
+	if stdinIsTerminal {
+		// For terminal mode, create a pty so we can inject messages
+		ptyMaster, err = pty.Start(cmd)
+		if err != nil {
+			return fmt.Errorf("failed to create pty: %w", err)
+		}
+		defer ptyMaster.Close()
+		
+		// Set the pty size to match the current terminal
+		if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
+			pty.Setsize(ptyMaster, ws)
+		}
+		
+		// Put the real terminal in raw mode to properly forward key sequences
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("failed to set terminal to raw mode: %w", err)
+		}
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+		
+		// Forward pty output to real stdout/stderr
+		go io.Copy(os.Stdout, ptyMaster)
+		
+		// Forward real stdin to pty (in background)
+		go io.Copy(ptyMaster, os.Stdin)
+		
+		// Use ptyMaster as our message injection point
+		stdinPipe = ptyMaster
+	} else {
+		// For piped mode, use our pipe for message injection
+		stdinPipe, err = cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create stdin pipe: %w", err)
+		}
+		
+		// Connect stdout and stderr directly for transparency
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	// Start the command (only for non-pty mode, pty.Start already started it)
+	if !stdinIsTerminal {
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("failed to start command: %w", err)
+		}
+	}
+	
+	// Don't manipulate stdin in terminal mode
+	
+	// Debug: log that process started
+	if debugFile, err := os.OpenFile("/tmp/minion-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		debugFile.WriteString(fmt.Sprintf("[%s] Started process: %s (PID: %d)\n", time.Now().Format("15:04:05"), args[0], cmd.Process.Pid))
+		debugFile.WriteString(fmt.Sprintf("[%s] Sent initial newline to Claude\n", time.Now().Format("15:04:05")))
+		debugFile.Close()
+	}
+
+	// Create channels for coordination
+	stdinDone := make(chan bool)
+	processExit := make(chan error, 1)
+	stopTicker := make(chan bool)
+	var processRunning bool = true
+	var processRunningMutex sync.RWMutex
+	
+	// Copy from os.Stdin to the command's stdin in a goroutine
+	go func() {
+		defer close(stdinDone)
+		if !stdinIsTerminal {
+			// For piped stdin, copy everything
+			io.Copy(stdinPipe, os.Stdin)
+		}
+		// For terminal stdin, don't copy anything but keep pipe open for message injection
+	}()
+
+	// Watch for minion messages and forward them to stdin
+	messageTicker := time.NewTicker(500 * time.Millisecond)
+	go func() {
+		defer messageTicker.Stop()
+		
+		// Create debug log file
+		var debugLog *os.File
+		debugLog, err := os.OpenFile("/tmp/minion-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			defer debugLog.Close()
+			debugLog.WriteString(fmt.Sprintf("[%s] Started minion message ticker for working dir: %s\n", time.Now().Format("15:04:05"), workingDir))
+			debugLog.WriteString(fmt.Sprintf("[%s] Config dir: %s\n", time.Now().Format("15:04:05"), configDir))
+			debugLog.WriteString(fmt.Sprintf("[%s] Entering message polling loop\n", time.Now().Format("15:04:05")))
+		}
+		
+		for {
+			select {
+			case <-messageTicker.C:
+				// Check for pending messages
+				message, err := stateManager.PopMinionMessage(workingDir)
+				if err != nil {
+					if debugLog != nil {
+						debugLog.WriteString(fmt.Sprintf("[%s] Error checking minion messages: %v\n", time.Now().Format("15:04:05"), err))
+					}
+					continue
+				}
+				
+				if message != nil {
+					if debugLog != nil {
+						debugLog.WriteString(fmt.Sprintf("[%s] Found message: %s\n", time.Now().Format("15:04:05"), message.Message))
+					}
+					
+					// Check if process is still running before writing to stdin
+					processRunningMutex.RLock()
+					running := processRunning
+					processRunningMutex.RUnlock()
+					
+					if !running {
+						if debugLog != nil {
+							debugLog.WriteString(fmt.Sprintf("[%s] Process not running, discarding message\n", time.Now().Format("15:04:05")))
+						}
+						continue
+					}
+					
+					// Send message to child process stdin (only if we have a pipe)
+					if stdinPipe != nil {
+						// Send the message character by character, then Enter
+						for _, char := range message.Message {
+							stdinPipe.Write([]byte{byte(char)})
+							time.Sleep(10 * time.Millisecond) // Small delay between characters
+						}
+						// Send Enter as carriage return
+						_, err := stdinPipe.Write([]byte{'\r'})
+						if err == nil {
+							// Try to flush if it's a File
+							if f, ok := stdinPipe.(*os.File); ok {
+								f.Sync()
+							}
+						}
+						if err != nil {
+							if debugLog != nil {
+								debugLog.WriteString(fmt.Sprintf("[%s] Error writing to stdin (pipe may be closed): %v\n", time.Now().Format("15:04:05"), err))
+							}
+							// Don't return here - the process might still be running, just stdin closed
+							continue
+						}
+						if debugLog != nil {
+							debugLog.WriteString(fmt.Sprintf("[%s] Successfully sent message '%s' + Enter to stdin\n", time.Now().Format("15:04:05"), message.Message))
+						}
+					} else {
+						if debugLog != nil {
+							debugLog.WriteString(fmt.Sprintf("[%s] No stdin pipe available for message injection\n", time.Now().Format("15:04:05")))
+						}
+					}
+				}
+			case <-processExit:
+				if debugLog != nil {
+					debugLog.WriteString(fmt.Sprintf("[%s] Message ticker exiting due to process exit\n", time.Now().Format("15:04:05")))
+				}
+				return
+			case <-stopTicker:
+				if debugLog != nil {
+					debugLog.WriteString(fmt.Sprintf("[%s] Message ticker stopping\n", time.Now().Format("15:04:05")))
+				}
+				return
+			}
+		}
+	}()
+
+	// Wait for the command to complete in a goroutine
+	go func() {
+		processExit <- cmd.Wait()
+	}()
+
+	// Wait for process to exit (and stdin if it's not a terminal)
+	if stdinIsTerminal {
+		// For terminal stdin, just wait for process to exit
+		err = <-processExit
+		// Process exited, mark it as not running
+		processRunningMutex.Lock()
+		processRunning = false
+		processRunningMutex.Unlock()
+		
+		// Stop the message ticker first
+		close(stopTicker)
+		// Give ticker time to stop
+		time.Sleep(50 * time.Millisecond)
+		// Then close stdin pipe
+		stdinPipe.Close()
+	} else {
+		// For piped stdin, coordinate between process exit and stdin done
+		select {
+		case err = <-processExit:
+			// Process exited, mark it as not running
+			processRunningMutex.Lock()
+			processRunning = false
+			processRunningMutex.Unlock()
+			
+			// Stop the message ticker first
+			close(stopTicker)
+			// Give ticker time to stop
+			time.Sleep(50 * time.Millisecond)
+			// Then close stdin pipe
+			stdinPipe.Close()
+			// Wait a bit for any remaining stdin data
+			select {
+			case <-stdinDone:
+			case <-time.After(100 * time.Millisecond):
+			}
+		case <-stdinDone:
+			// Stdin closed, mark process as not running
+			processRunningMutex.Lock()
+			processRunning = false
+			processRunningMutex.Unlock()
+			
+			// Stop ticker and close the pipe to signal EOF to subprocess
+			close(stopTicker)
+			time.Sleep(50 * time.Millisecond)
+			stdinPipe.Close()
+			// Now wait for process to complete
+			err = <-processExit
+		}
+	}
+	
+	if err != nil {
+		// Exit with the same exit code as the child process
+		if exitError, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitError.ExitCode())
+		}
+		return fmt.Errorf("command execution failed: %w", err)
+	}
+
+	return nil
 }

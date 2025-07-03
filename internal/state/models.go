@@ -32,3 +32,10 @@ type RepositoryWithWorktrees struct {
 	Worktrees []Worktree    `json:"worktrees"`
 	Status    []AgentStatus `json:"status"`
 }
+
+type MinionMessage struct {
+	ID        string    `json:"id"`
+	Path      string    `json:"path"`      // Working directory of the minion
+	Message   string    `json:"message"`   // Message to send to stdin
+	Timestamp time.Time `json:"timestamp"`
+}

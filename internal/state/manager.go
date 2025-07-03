@@ -396,3 +396,110 @@ func (w *FileWatcher) start() {
 func (w *FileWatcher) stop() {
 	close(w.stopCh)
 }
+
+// AddMinionMessage adds a message for a minion in a specific directory
+func (m *Manager) AddMinionMessage(path, message string) error {
+	messages, err := m.GetMinionMessages(path)
+	if err != nil {
+		return err
+	}
+
+	newMessage := MinionMessage{
+		ID:        fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		Path:      path,
+		Message:   message,
+		Timestamp: time.Now(),
+	}
+
+	messages = append(messages, newMessage)
+	return m.saveMinionMessages(path, messages)
+}
+
+// GetMinionMessages gets all pending messages for a minion in a specific directory
+func (m *Manager) GetMinionMessages(path string) ([]MinionMessage, error) {
+	messageFile := m.getMinionMessageFile(path)
+	
+	if _, err := os.Stat(messageFile); os.IsNotExist(err) {
+		return []MinionMessage{}, nil
+	}
+
+	data, err := os.ReadFile(messageFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read minion messages file: %w", err)
+	}
+
+	var messages []MinionMessage
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return nil, fmt.Errorf("failed to parse minion messages file: %w", err)
+	}
+
+	return messages, nil
+}
+
+// ClearMinionMessages removes all messages for a minion in a specific directory
+func (m *Manager) ClearMinionMessages(path string) error {
+	messageFile := m.getMinionMessageFile(path)
+	return os.Remove(messageFile)
+}
+
+// PopMinionMessage gets the oldest message and removes it from the queue
+func (m *Manager) PopMinionMessage(path string) (*MinionMessage, error) {
+	messageFile := m.getMinionMessageFile(path)
+	log.Printf("Checking for minion messages in file: %s (for path: %s)", messageFile, path)
+	messages, err := m.GetMinionMessages(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(messages) == 0 {
+		return nil, nil
+	}
+
+	// Get the first message (oldest)
+	message := messages[0]
+	
+	// Remove it from the slice
+	remainingMessages := messages[1:]
+	
+	// Save the remaining messages
+	if len(remainingMessages) == 0 {
+		// If no messages left, remove the file
+		return &message, m.ClearMinionMessages(path)
+	} else {
+		return &message, m.saveMinionMessages(path, remainingMessages)
+	}
+}
+
+// saveMinionMessages saves messages to the file for a specific directory
+func (m *Manager) saveMinionMessages(path string, messages []MinionMessage) error {
+	messageFile := m.getMinionMessageFile(path)
+	log.Printf("Saving minion messages to file: %s (for path: %s)", messageFile, path)
+	
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(filepath.Dir(messageFile), 0755); err != nil {
+		return fmt.Errorf("failed to create minion messages directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(messages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal minion messages: %w", err)
+	}
+
+	if err := os.WriteFile(messageFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write minion messages file: %w", err)
+	}
+
+	return nil
+}
+
+// getMinionMessageFile returns the path to the message file for a specific directory
+func (m *Manager) getMinionMessageFile(path string) string {
+	// Create a safe filename from the path
+	safeName := strings.ReplaceAll(path, "/", "_")
+	safeName = strings.ReplaceAll(safeName, "\\", "_")
+	safeName = strings.ReplaceAll(safeName, ":", "_")
+	if safeName == "" {
+		safeName = "root"
+	}
+	return filepath.Join(m.configDir, "minion-messages", fmt.Sprintf("messages_%s.json", safeName))
+}

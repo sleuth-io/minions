@@ -32,6 +32,11 @@ type AddRepositoryRequest struct {
 	Name string `json:"name,omitempty"`
 }
 
+type MinionMessageRequest struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -100,6 +105,7 @@ func (s *Server) Start(port string) error {
 	http.HandleFunc("/api/suggestions/directories", s.handleDirectorySuggestions)
 	http.HandleFunc("/api/hooks/status", s.handleHookStatus)
 	http.HandleFunc("/api/hooks/install", s.handleHookInstall)
+	http.HandleFunc("/api/minion/message", s.handleMinionMessage)
 	http.HandleFunc("/events", s.handleSSE)
 
 	fmt.Printf("Serving at http://localhost:%s\n", port)
@@ -805,4 +811,45 @@ func (s *Server) openPyCharmLinux(projectPath string) error {
 	}
 
 	return fmt.Errorf("PyCharm not found. Tried commands: %v", commands)
+}
+
+func (s *Server) handleMinionMessage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req MinionMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Path == "" {
+		s.writeError(w, "Path is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Message == "" {
+		s.writeError(w, "Message is required", http.StatusBadRequest)
+		return
+	}
+
+	// Add message to the minion queue for this path
+	log.Printf("Web API: Adding minion message for path '%s': %s", req.Path, req.Message)
+	if err := s.stateManager.AddMinionMessage(req.Path, req.Message); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to send message to minion: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Web API: Successfully added minion message for path '%s'", req.Path)
+
+	response := map[string]string{
+		"status":  "sent",
+		"path":    req.Path,
+		"message": req.Message,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }

@@ -39,3 +39,11 @@ type MinionMessage struct {
 	Message   string    `json:"message"`   // Message to send to stdin
 	Timestamp time.Time `json:"timestamp"`
 }
+
+type SystemAction struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type"`        // "command", "file_operation", etc.
+	Description string    `json:"description"` // Human readable description
+	Command     string    `json:"command,omitempty"` // Optional actual command text
+	Timestamp   time.Time `json:"timestamp"`
+}

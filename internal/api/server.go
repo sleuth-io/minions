@@ -106,6 +106,7 @@ func (s *Server) Start(port string) error {
 	http.HandleFunc("/api/hooks/status", s.handleHookStatus)
 	http.HandleFunc("/api/hooks/install", s.handleHookInstall)
 	http.HandleFunc("/api/minion/message", s.handleMinionMessage)
+	http.HandleFunc("/api/system-commands", s.handleSystemCommands)
 	http.HandleFunc("/events", s.handleSSE)
 
 	fmt.Printf("Serving at http://localhost:%s\n", port)
@@ -578,8 +579,20 @@ func (s *Server) installHook(repoPath string) error {
 	// Create .claude directory
 	claudeDir := filepath.Join(repoPath, ".claude")
 	fmt.Printf("Creating directory: %s\n", claudeDir)
+	
+	// Check if directory already exists
+	operation := "create"
+	if _, err := os.Stat(claudeDir); err == nil {
+		operation = "modify" // Directory already exists, we're modifying its contents
+	}
+	
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .claude directory: %w", err)
+	}
+	
+	// Track directory creation
+	if operation == "create" {
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("📁 Created directory: %s", filepath.Base(claudeDir)))
 	}
 
 	// Merge with existing configuration
@@ -598,10 +611,20 @@ func (s *Server) installHook(repoPath string) error {
 	}
 
 	fmt.Printf("Hook installation completed successfully for: %s\n", repoPath)
+	
+	// Broadcast command updates to show file operations
+	s.BroadcastStatusUpdate()
+	
 	return nil
 }
 
 func (s *Server) mergeHookConfig(configPath string) error {
+	// Check if file exists to determine operation type
+	operation := "create"
+	if _, err := os.Stat(configPath); err == nil {
+		operation = "modify"
+	}
+	
 	// Load existing config or create new one
 	var config map[string]interface{}
 
@@ -623,7 +646,20 @@ func (s *Server) mergeHookConfig(configPath string) error {
 		return fmt.Errorf("failed to marshal merged config: %w", err)
 	}
 
-	return os.WriteFile(configPath, configData, 0644)
+	err = os.WriteFile(configPath, configData, 0644)
+	if err != nil {
+		return err
+	}
+	
+	// Track the file operation
+	fileName := filepath.Base(configPath)
+	if operation == "create" {
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", fileName))
+	} else {
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", fileName))
+	}
+
+	return nil
 }
 
 func (s *Server) generateHookConfig() map[string]interface{} {
@@ -689,6 +725,12 @@ func (s *Server) generateHookConfig() map[string]interface{} {
 func (s *Server) updateGitIgnore(gitignorePath string) error {
 	claudeEntry := ".claude/"
 
+	// Check if file exists to determine operation type
+	operation := "create"
+	if _, err := os.Stat(gitignorePath); err == nil {
+		operation = "modify"
+	}
+
 	// Read existing .gitignore
 	var content []byte
 	var err error
@@ -712,7 +754,20 @@ func (s *Server) updateGitIgnore(gitignorePath string) error {
 	contentStr += "\n# Claude Code configuration (auto-generated)\n"
 	contentStr += claudeEntry + "\n"
 
-	return os.WriteFile(gitignorePath, []byte(contentStr), 0644)
+	err = os.WriteFile(gitignorePath, []byte(contentStr), 0644)
+	if err != nil {
+		return err
+	}
+	
+	// Track the file operation
+	fileName := filepath.Base(gitignorePath)
+	if operation == "create" {
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", fileName))
+	} else {
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", fileName))
+	}
+	
+	return nil
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -729,12 +784,27 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Handle connection cleanup
 	defer s.hub.RemoveConnection(ch)
 
-	// Send initial status
+	// Send initial status and commands
 	statuses, err := s.stateManager.GetAgentStatus()
 	if err == nil {
 		message := map[string]interface{}{
 			"type": "status_update",
 			"data": statuses,
+		}
+		s.hub.Broadcast(message)
+	}
+	
+	// Send initial actions
+	actions, err := s.stateManager.GetSystemActions()
+	if err == nil {
+		// Reverse the slice to show most recent first
+		for i, j := 0, len(actions)-1; i < j; i, j = i+1, j-1 {
+			actions[i], actions[j] = actions[j], actions[i]
+		}
+		
+		message := map[string]interface{}{
+			"type": "actions_update",
+			"data": actions,
 		}
 		s.hub.Broadcast(message)
 	}
@@ -769,6 +839,21 @@ func (s *Server) BroadcastStatusUpdate() {
 	}
 
 	s.hub.Broadcast(message)
+	
+	// Also broadcast updated actions
+	actions, err := s.stateManager.GetSystemActions()
+	if err == nil {
+		// Reverse the slice to show most recent first
+		for i, j := 0, len(actions)-1; i < j; i, j = i+1, j-1 {
+			actions[i], actions[j] = actions[j], actions[i]
+		}
+		
+		actionMessage := map[string]interface{}{
+			"type": "actions_update",
+			"data": actions,
+		}
+		s.hub.Broadcast(actionMessage)
+	}
 }
 
 func (s *Server) writeError(w http.ResponseWriter, message string, status int) {
@@ -790,6 +875,7 @@ func (s *Server) openPyCharmLinux(projectPath string) error {
 
 	// Try each command until one works
 	for _, cmd := range commands {
+		log.Printf("Trying command: %s", cmd)
 		// Split command and arguments
 		parts := strings.Fields(cmd)
 		if len(parts) == 0 {
@@ -801,11 +887,34 @@ func (s *Server) openPyCharmLinux(projectPath string) error {
 		
 		// Check if command exists
 		if _, err := exec.LookPath(cmdName); err == nil {
+			log.Printf("Found command: %s", cmdName)
 			// Execute the command with its arguments plus the project path
 			args := append(cmdArgs, projectPath)
+			log.Printf("Executing command: %s with args: %v", cmdName, args)
+			
 			execCmd := exec.Command(cmdName, args...)
-			execCmd.Start() // Use Start() instead of Run() to not wait for completion
+			err := execCmd.Start() // Use Start() instead of Run() to not wait for completion
+			
+			// Add action to UI display AFTER successful execution
+			if err == nil {
+				go func() {
+					log.Printf("Adding action to UI")
+					description := "🚀 Opened PyCharm"
+					command := fmt.Sprintf("%s %s", cmdName, strings.Join(args, " "))
+					s.stateManager.AddActionWithCommand("command", description, command)
+					log.Printf("Action added, broadcasting update")
+					s.BroadcastStatusUpdate()
+					log.Printf("Broadcast completed")
+				}()
+			}
+			
+			if err != nil {
+				log.Printf("Command execution failed: %v", err)
+				return fmt.Errorf("failed to start PyCharm: %v", err)
+			}
+			
 			log.Printf("Successfully launched PyCharm with command: %s %s", cmd, projectPath)
+			
 			return nil
 		}
 	}
@@ -852,4 +961,26 @@ func (s *Server) handleMinionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleSystemCommands(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	actions, err := s.stateManager.GetSystemActions()
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to get system actions: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Reverse the slice to show most recent first
+	for i, j := 0, len(actions)-1; i < j; i, j = i+1, j-1 {
+		actions[i], actions[j] = actions[j], actions[i]
+	}
+
+	json.NewEncoder(w).Encode(actions)
 }

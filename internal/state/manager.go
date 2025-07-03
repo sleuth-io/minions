@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,12 +25,15 @@ type Manager struct {
 	configDir        string
 	changeCallbacks  []StatusChangeCallback
 	fileWatcher      *FileWatcher
+	systemActions    []SystemAction // In-memory storage for system actions
+	actionsMutex     sync.RWMutex   // Mutex for thread-safe access to actions
 }
 
 func NewManager(configDir string) (*Manager, error) {
 	manager := &Manager{
 		configDir:       configDir,
 		changeCallbacks: make([]StatusChangeCallback, 0),
+		systemActions:   make([]SystemAction, 0),
 	}
 	
 	// Set up file watcher for agent status file
@@ -503,3 +507,48 @@ func (m *Manager) getMinionMessageFile(path string) string {
 	}
 	return filepath.Join(m.configDir, "minion-messages", fmt.Sprintf("messages_%s.json", safeName))
 }
+
+// System action tracking functions
+func (m *Manager) AddAction(actionType string, description string) {
+	m.AddActionWithCommand(actionType, description, "")
+}
+
+func (m *Manager) AddActionWithCommand(actionType string, description string, command string) {
+	log.Printf("AddActionWithCommand called with type: %s, description: %s, command: %s", actionType, description, command)
+	action := SystemAction{
+		ID:          fmt.Sprintf("action_%d", time.Now().UnixNano()),
+		Type:        actionType,
+		Description: description,
+		Command:     command,
+		Timestamp:   time.Now(),
+	}
+	
+	log.Printf("Acquiring actions mutex")
+	m.actionsMutex.Lock()
+	defer m.actionsMutex.Unlock()
+	
+	log.Printf("Adding action to slice")
+	m.systemActions = append(m.systemActions, action)
+	
+	// Keep only the last 50 actions
+	if len(m.systemActions) > 50 {
+		m.systemActions = m.systemActions[len(m.systemActions)-50:]
+	}
+	
+	log.Printf("Notifying status change")
+	// Notify callbacks that actions have changed (non-blocking)
+	go m.notifyStatusChange()
+	log.Printf("AddAction completed")
+}
+
+func (m *Manager) GetSystemActions() ([]SystemAction, error) {
+	m.actionsMutex.RLock()
+	defer m.actionsMutex.RUnlock()
+	
+	// Return a copy of the slice to prevent race conditions
+	actionsCopy := make([]SystemAction, len(m.systemActions))
+	copy(actionsCopy, m.systemActions)
+	
+	return actionsCopy, nil
+}
+

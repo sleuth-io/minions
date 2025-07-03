@@ -195,6 +195,42 @@
         </div>
       </div>
     </main>
+
+    <!-- System Actions Panel -->
+    <div class="actions-panel" :class="{ expanded: actionsPanelExpanded }">
+      <div class="actions-header" @click="toggleActionsPanel">
+        <h3>🔧 System Actions</h3>
+        <div class="actions-info">
+          <span class="action-count">{{ systemActions.length }} actions</span>
+          <span class="expand-icon" :class="{ rotated: actionsPanelExpanded }">▼</span>
+        </div>
+      </div>
+      
+      <div class="actions-content" v-if="actionsPanelExpanded">
+        <div v-if="systemActions.length === 0" class="no-actions">
+          No system actions executed yet
+        </div>
+        <div v-else class="actions-list">
+          <div 
+            v-for="action in systemActions" 
+            :key="action.id" 
+            class="action-item"
+            :class="'type-' + action.type"
+          >
+            <div class="action-main">
+              <div class="action-text">
+                <span class="action-description">{{ action.description }}</span>
+                <span v-if="action.command" class="action-command">{{ action.command }}</span>
+              </div>
+              <div class="action-meta">
+                <span class="action-time">{{ formatTimestamp(action.timestamp) }}</span>
+                <span class="action-type" :class="'type-' + action.type">{{ action.type }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -215,13 +251,16 @@ export default {
       suggestionLoading: false,
       hookStatuses: {},
       hookLoading: {},
-      expandedMessages: {}
+      expandedMessages: {},
+      systemActions: [],
+      actionsPanelExpanded: false
     }
   },
   async mounted() {
     await this.loadRepositories()
     this.loadPathHistory()
     await this.loadHookStatuses()
+    await this.loadSystemActions()
     this.setupSSE()
   },
   beforeUnmount() {
@@ -517,6 +556,14 @@ export default {
       return this.hookStatuses[repoPath] || { is_installed: false }
     },
     
+    async loadSystemActions() {
+      try {
+        this.systemActions = await apiClient.getSystemActions()
+      } catch (error) {
+        console.error('Failed to load system actions:', error)
+      }
+    },
+
     setupSSE() {
       // Connect to Server-Sent Events
       apiClient.connectSSE()
@@ -526,6 +573,12 @@ export default {
         console.log('Received status update:', statusData)
         // Update repository status in place without full reload
         this.updateRepositoryStatuses(statusData)
+      })
+      
+      // Listen for action updates
+      apiClient.onSSEMessage('actions_update', (actionsData) => {
+        console.log('Received actions update:', actionsData)
+        this.systemActions = actionsData
       })
     },
     
@@ -552,6 +605,15 @@ export default {
         }
         return repo
       })
+    },
+
+    toggleActionsPanel() {
+      this.actionsPanelExpanded = !this.actionsPanelExpanded
+    },
+
+    formatTimestamp(timestamp) {
+      const date = new Date(timestamp)
+      return date.toLocaleTimeString()
     }
   }
 }
@@ -590,7 +652,7 @@ export default {
 .main-content {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 0 2rem;
+  padding: 0 2rem 60px; /* Add bottom padding for commands panel */
 }
 
 .section {
@@ -1124,5 +1186,163 @@ export default {
 
 .add-btn:disabled:hover {
   background: #ccc;
+}
+
+/* System Actions Panel */
+.actions-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 1px solid #e0e0e0;
+  box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+  transition: height 0.3s ease;
+  z-index: 1000;
+  height: 50px;
+  overflow: hidden;
+}
+
+.actions-panel.expanded {
+  height: 300px;
+}
+
+.actions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 2rem;
+  cursor: pointer;
+  user-select: none;
+  height: 50px;
+  box-sizing: border-box;
+}
+
+.actions-header:hover {
+  background: #f8f9fa;
+}
+
+.actions-header h3 {
+  margin: 0;
+  color: #333;
+  font-size: 1rem;
+}
+
+.actions-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.action-count {
+  font-size: 0.9rem;
+  color: #666;
+  background: #e9ecef;
+  padding: 0.25rem 0.5rem;
+  border-radius: 12px;
+}
+
+.expand-icon {
+  font-size: 0.8rem;
+  color: #666;
+  transition: transform 0.3s ease;
+}
+
+.expand-icon.rotated {
+  transform: rotate(180deg);
+}
+
+.actions-content {
+  height: 250px;
+  overflow-y: auto;
+  padding: 0 2rem 1rem;
+}
+
+.no-actions {
+  text-align: center;
+  color: #666;
+  font-style: italic;
+  padding: 2rem;
+}
+
+.actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.action-item {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 1rem;
+  background: #f8f9fa;
+}
+
+.action-item.type-command {
+  border-left: 4px solid #007bff;
+}
+
+.action-item.type-file_operation {
+  border-left: 4px solid #6f42c1;
+}
+
+.action-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.action-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.action-description {
+  font-weight: bold;
+  color: #333;
+  font-size: 0.95rem;
+}
+
+.action-command {
+  font-family: monospace;
+  color: #495057;
+  font-size: 0.85rem;
+  background: #f8f9fa;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid #007bff;
+}
+
+.action-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.action-time {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.action-type {
+  font-size: 0.7rem;
+  font-weight: bold;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border-radius: 10px;
+}
+
+.action-type.type-command {
+  background: #cce5ff;
+  color: #004085;
+}
+
+.action-type.type-file_operation {
+  background: #e2d3f3;
+  color: #6f42c1;
 }
 </style>

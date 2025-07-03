@@ -94,6 +94,11 @@ class ApiClient {
     })
   }
 
+  // System actions
+  async getSystemActions() {
+    return this.request('/system-commands')
+  }
+
   // Server-Sent Events methods
   connectSSE() {
     if (this.eventSource && this.eventSource.readyState === EventSource.OPEN) {

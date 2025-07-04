@@ -102,6 +102,7 @@ func (s *Server) Start(port string) error {
 	http.HandleFunc("/api/status", s.handleStatus)
 	http.HandleFunc("/api/webhook/claude", s.handleClaudeWebhook)
 	http.HandleFunc("/api/actions/open-ide", s.handleOpenIDE)
+	http.HandleFunc("/api/binary-path", s.handleBinaryPath)
 	http.HandleFunc("/api/suggestions/directories", s.handleDirectorySuggestions)
 	http.HandleFunc("/api/hooks/status", s.handleHookStatus)
 	http.HandleFunc("/api/hooks/install", s.handleHookInstall)
@@ -153,7 +154,7 @@ func (s *Server) getRepositories(w http.ResponseWriter, r *http.Request) {
 
 	// Get worktrees and status for each repository
 	var reposWithData []state.RepositoryWithWorktrees
-	agentStatuses, _ := s.stateManager.GetAgentStatus()
+	agentStatuses, _ := s.stateManager.GetAgentStatusWithMessages()
 
 	for _, repo := range repos {
 		worktrees, err := s.gitManager.GetWorktrees(repo.Path)
@@ -163,14 +164,26 @@ func (s *Server) getRepositories(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Find relevant status entries
-		var repoStatuses []state.AgentStatus
+		var repoStatuses []state.AgentStatusWithMessages
 		for _, status := range agentStatuses {
-			// Check if status path matches this repo or any of its worktrees
-			for _, wt := range worktrees {
-				if status.Path == wt.Path {
-					repoStatuses = append(repoStatuses, status)
-					break
+			// Check if status path is within this repo or any of its worktrees
+			isRelevant := false
+			
+			// Check if status path is within the main repository
+			if strings.HasPrefix(status.Path, repo.Path+"/") || status.Path == repo.Path {
+				isRelevant = true
+			} else {
+				// Check if status path is within any worktree
+				for _, wt := range worktrees {
+					if strings.HasPrefix(status.Path, wt.Path+"/") || status.Path == wt.Path {
+						isRelevant = true
+						break
+					}
 				}
+			}
+			
+			if isRelevant {
+				repoStatuses = append(repoStatuses, status)
 			}
 		}
 
@@ -239,11 +252,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	statuses, err := s.stateManager.GetAgentStatus()
+	statuses, err := s.stateManager.GetAgentStatusWithMessages()
 	if err != nil {
 		s.writeError(w, fmt.Sprintf("Failed to get status: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// fsnotify now handles all message updates automatically
 
 	json.NewEncoder(w).Encode(statuses)
 }
@@ -592,7 +607,7 @@ func (s *Server) installHook(repoPath string) error {
 	
 	// Track directory creation
 	if operation == "create" {
-		s.stateManager.AddAction("file_operation", fmt.Sprintf("📁 Created directory: %s", filepath.Base(claudeDir)))
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("📁 Created directory: %s", claudeDir))
 	}
 
 	// Merge with existing configuration
@@ -652,11 +667,10 @@ func (s *Server) mergeHookConfig(configPath string) error {
 	}
 	
 	// Track the file operation
-	fileName := filepath.Base(configPath)
 	if operation == "create" {
-		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", fileName))
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", configPath))
 	} else {
-		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", fileName))
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", configPath))
 	}
 
 	return nil
@@ -760,11 +774,10 @@ func (s *Server) updateGitIgnore(gitignorePath string) error {
 	}
 	
 	// Track the file operation
-	fileName := filepath.Base(gitignorePath)
 	if operation == "create" {
-		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", fileName))
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("➕ Created file: %s", gitignorePath))
 	} else {
-		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", fileName))
+		s.stateManager.AddAction("file_operation", fmt.Sprintf("✏️ Modified file: %s", gitignorePath))
 	}
 	
 	return nil
@@ -785,7 +798,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer s.hub.RemoveConnection(ch)
 
 	// Send initial status and commands
-	statuses, err := s.stateManager.GetAgentStatus()
+	statuses, err := s.stateManager.GetAgentStatusWithMessages()
 	if err == nil {
 		message := map[string]interface{}{
 			"type": "status_update",
@@ -827,11 +840,13 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) BroadcastStatusUpdate() {
-	statuses, err := s.stateManager.GetAgentStatus()
+	statuses, err := s.stateManager.GetAgentStatusWithMessages()
 	if err != nil {
 		log.Printf("Failed to get status for broadcast: %v", err)
 		return
 	}
+
+	// fsnotify now handles all message updates automatically
 
 	message := map[string]interface{}{
 		"type": "status_update",
@@ -984,3 +999,26 @@ func (s *Server) handleSystemCommands(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(actions)
 }
+
+func (s *Server) handleBinaryPath(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get the absolute path of the current executable
+	execPath, err := os.Executable()
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to get executable path: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]string{
+		"path": execPath,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+

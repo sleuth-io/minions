@@ -2,44 +2,65 @@
   <div id="app">
     <header class="header">
       <h1>Coding Agent Dashboard</h1>
-      <p class="subtitle">Monitor and manage coding agent activities across repositories</p>
+      <p class="subtitle">Monitor and manage coding tasks across repositories</p>
     </header>
     
     <main class="main-content">
-      <!-- Waiting Agents Section -->
-      <div class="section waiting-agents" v-if="waitingAgents.length > 0">
-        <h2>⏳ Waiting for User Input</h2>
-        <div class="waiting-list">
-          <div v-for="agent in waitingAgents" :key="agent.path" class="waiting-item">
-            <div class="waiting-info">
-              <div class="waiting-path">{{ agent.path }}</div>
-              <div class="waiting-details">
-                <span class="waiting-session">Session: {{ agent.session_id?.substring(0, 8) }}...</span>
-                <span class="waiting-time">{{ formatTimeSince(agent.last_activity) }}</span>
+      <!-- Waiting Tasks Section -->
+      <div class="section waiting-tasks" v-if="waitingTasks.length > 0">
+        <h2>⏳ Tasks Waiting for Input</h2>
+        <div class="task-list">
+          <div v-for="task in waitingTasks" :key="task.path" class="task-item">
+            <div class="task-info">
+              <div class="task-name">{{ task.name }}</div>
+              <div class="task-details">
+                <span class="task-repo" :title="task.path">{{ task.repository }}</span>
+                <span :class="['task-status', task.status]">{{ task.status }}</span>
+                <span class="task-time">{{ formatTimeSince(task.last_activity) }}</span>
               </div>
               <div 
-                v-if="agent.last_message" 
-                class="waiting-message"
-                @click="toggleMessageExpansion(agent.path)"
-                :title="agent.full_last_message ? 'Click to expand' : ''"
+                v-if="task.last_message" 
+                class="task-message"
+                @click="toggleMessageExpansion(task.path)"
+                :title="task.full_last_message ? 'Click to expand' : ''"
               >
-                {{ agent.last_message }}
+                {{ task.last_message }}
               </div>
               <div 
-                v-if="expandedMessages[agent.path] && agent.full_last_message" 
+                v-if="expandedMessages[task.path] && task.full_last_message" 
                 class="expanded-message"
               >
-                {{ agent.full_last_message }}
+                {{ task.full_last_message }}
                 <div class="message-actions">
-                  <button @click="sendMinionMessage(agent.path, 'hi')" class="action-btn">
+                  <button @click="sendMinionMessage(task.path, 'hi')" class="action-btn">
                     Hi
                   </button>
                 </div>
               </div>
             </div>
-            <div class="waiting-actions">
-              <button @click="openInPyCharm(agent.path)" class="open-btn">
+            <div class="task-actions">
+              <button @click="showMinionCommand(task)" class="minion-btn" title="Show command to run Claude in minion mode">
+                🤖 Minion
+              </button>
+              <button @click="openInPyCharm(task.path)" class="open-btn">
                 Open in PyCharm
+              </button>
+              <button 
+                v-if="task.isMainCheckout && !task.hasHooks"
+                @click="installHook(task.path)"
+                :disabled="hookLoading[task.path]"
+                class="install-hook-btn"
+                title="Install Claude Code hooks for this repository"
+              >
+                {{ hookLoading[task.path] ? 'Installing...' : 'Install Hooks' }}
+              </button>
+              <button 
+                v-if="task.isMainCheckout"
+                @click="removeRepository(task.repoId)"
+                class="remove-btn"
+                title="Remove repository"
+              >
+                ×
               </button>
             </div>
           </div>
@@ -57,82 +78,69 @@
         <button @click="loadRepositories" class="retry-btn">Retry</button>
       </div>
 
-      <!-- Repositories Section -->
-      <div class="section repositories" v-if="!loading && repositories.length > 0">
-        <h2>📁 Repositories</h2>
-        <div v-for="repo in repositories" :key="repo.id" class="repository-card">
-          <div class="repo-header">
-            <div class="repo-info">
-              <h3>{{ repo.name || repo.path }}</h3>
-              <span class="repo-path" v-if="repo.name">{{ repo.path }}</span>
-            </div>
-            <div class="repo-actions">
-              <div class="hook-status">
-                <span 
-                  v-if="getHookStatus(repo.path).is_installed" 
-                  class="hook-indicator installed"
-                  title="Claude Code hooks are installed"
-                >
-                  🪝 Hooks Installed
-                </span>
-                <div v-else class="hook-not-installed">
-                  <span class="hook-indicator not-installed" title="Claude Code hooks not installed">
-                    🚫 No Hooks
-                  </span>
-                  <button 
-                    @click="installHook(repo.path)"
-                    :disabled="hookLoading[repo.path]"
-                    class="install-hook-btn"
-                    title="Install Claude Code hooks for this repository"
-                  >
-                    {{ hookLoading[repo.path] ? 'Installing...' : 'Install Hooks' }}
+      <!-- Other Tasks Section -->
+      <div class="section other-tasks" v-if="!loading && otherTasks.length > 0">
+        <h2>📋 Other Tasks</h2>
+        <div class="task-list">
+          <div v-for="task in otherTasks" :key="task.path" class="task-item">
+            <div class="task-info">
+              <div class="task-name">{{ task.name }}</div>
+              <div class="task-details">
+                <span class="task-repo" :title="task.path">{{ task.repository }}</span>
+                <span :class="['task-status', task.status]">{{ task.status }}</span>
+                <span v-if="task.last_activity" class="task-time">{{ formatTimeSince(task.last_activity) }}</span>
+              </div>
+              <div 
+                v-if="task.last_message" 
+                class="task-message"
+                @click="toggleMessageExpansion(task.path)"
+                :title="task.full_last_message ? 'Click to expand' : ''"
+              >
+                {{ task.last_message }}
+              </div>
+              <div 
+                v-if="expandedMessages[task.path] && task.full_last_message" 
+                class="expanded-message"
+              >
+                {{ task.full_last_message }}
+                <div class="message-actions">
+                  <button @click="sendMinionMessage(task.path, 'hi')" class="action-btn">
+                    Hi
                   </button>
                 </div>
               </div>
-              <button @click="removeRepository(repo.id)" class="remove-btn">×</button>
             </div>
-          </div>
-          
-          <div class="worktrees" v-if="repo.worktrees && repo.worktrees.length > 0">
-            <div v-for="worktree in repo.worktrees" :key="worktree.path" class="worktree-item">
-              <div class="worktree-info">
-                <span class="branch-name">{{ worktree.branch }}</span>
-                <span class="worktree-path">{{ worktree.path }}</span>
-                <span :class="['status', getWorktreeStatus(worktree)]">{{ getWorktreeStatus(worktree) }}</span>
-                <span 
-                  v-if="getWorktreeLastMessage(worktree)" 
-                  class="last-message"
-                  @click="toggleMessageExpansion(worktree.path)"
-                  :title="getWorktreeFullLastMessage(worktree) ? 'Click to expand' : ''"
-                >
-                  {{ getWorktreeLastMessage(worktree) }}
-                </span>
-                <div 
-                  v-if="expandedMessages[worktree.path] && getWorktreeFullLastMessage(worktree)" 
-                  class="expanded-message"
-                >
-                  {{ getWorktreeFullLastMessage(worktree) }}
-                  <div class="message-actions">
-                    <button @click="sendMinionMessage(worktree.path, 'hi')" class="action-btn">
-                      Hi
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <button @click="openInPyCharm(worktree.path)" class="open-btn">
+            <div class="task-actions">
+              <button @click="showMinionCommand(task)" class="minion-btn" title="Show command to run Claude in minion mode">
+                🤖 Minion
+              </button>
+              <button @click="openInPyCharm(task.path)" class="open-btn">
                 Open in PyCharm
               </button>
+              <button 
+                v-if="task.isMainCheckout && !task.hasHooks"
+                @click="installHook(task.path)"
+                :disabled="hookLoading[task.path]"
+                class="install-hook-btn"
+                title="Install Claude Code hooks for this repository"
+              >
+                {{ hookLoading[task.path] ? 'Installing...' : 'Install Hooks' }}
+              </button>
+              <button 
+                v-if="task.isMainCheckout"
+                @click="removeRepository(task.repoId)"
+                class="remove-btn"
+                title="Remove repository"
+              >
+                ×
+              </button>
             </div>
-          </div>
-          
-          <div v-else class="no-worktrees">
-            <p>No worktrees found for this repository</p>
           </div>
         </div>
       </div>
 
-      <div v-else-if="!loading" class="empty-state">
-        <p>No repositories configured. Add a repository to get started.</p>
+      <div v-else-if="!loading && waitingTasks.length === 0" class="empty-state">
+        <p>No tasks found. Add a repository to get started.</p>
       </div>
 
       <!-- Add Repository Section -->
@@ -231,6 +239,30 @@
         </div>
       </div>
     </div>
+
+    <!-- Minion Command Dialog -->
+    <div v-if="showMinionDialog" class="dialog-overlay" @click="closeMinionDialog">
+      <div class="dialog" @click.stop>
+        <div class="dialog-header">
+          <h3>🤖 Run Claude in Minion Mode</h3>
+          <button @click="closeMinionDialog" class="dialog-close">×</button>
+        </div>
+        <div class="dialog-content">
+          <p class="dialog-description">
+            Use this command to run Claude in minion mode:
+          </p>
+          <div class="command-container">
+            <code class="command-text" ref="commandText">{{ getMinionCommand(selectedTask) }}</code>
+            <button @click="copyCommand" class="copy-btn" title="Copy to clipboard">
+              📋 Copy
+            </button>
+          </div>
+          <p class="dialog-note">
+            This will connect Claude to the current minion session and allow you to send commands remotely.
+          </p>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -253,7 +285,10 @@ export default {
       hookLoading: {},
       expandedMessages: {},
       systemActions: [],
-      actionsPanelExpanded: false
+      actionsPanelExpanded: false,
+      showMinionDialog: false,
+      selectedTask: null,
+      binaryPath: null
     }
   },
   async mounted() {
@@ -261,10 +296,28 @@ export default {
     this.loadPathHistory()
     await this.loadHookStatuses()
     await this.loadSystemActions()
+    await this.loadBinaryPath()
     this.setupSSE()
+    
+    // Note: SSE updates provide real-time data, so no periodic refresh needed
+    
+    // Refresh when page becomes visible/focused
+    this.handleVisibilityChange = () => {
+      if (!document.hidden) {
+        this.loadRepositories()
+        this.loadHookStatuses()
+      }
+    }
+    
+    document.addEventListener('visibilitychange', this.handleVisibilityChange)
+    window.addEventListener('focus', this.handleVisibilityChange)
   },
   beforeUnmount() {
     apiClient.disconnectSSE()
+    if (this.handleVisibilityChange) {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange)
+      window.removeEventListener('focus', this.handleVisibilityChange)
+    }
   },
   computed: {
     localSuggestions() {
@@ -283,22 +336,79 @@ export default {
       return suggestions
     },
 
-    waitingAgents() {
-      const waiting = []
-      if (!this.repositories) return waiting
+    allTasks() {
+      const tasks = []
+      if (!this.repositories) return tasks
       
       for (const repo of this.repositories) {
-        if (repo.status) {
-          for (const status of repo.status) {
-            if (status.status === 'waiting') {
-              waiting.push(status)
+        const hookStatus = this.getHookStatus(repo.path)
+        const addedPaths = new Set()
+        
+        // Add tasks for all worktrees
+        if (repo.worktrees && repo.worktrees.length > 0) {
+          for (const worktree of repo.worktrees) {
+            // Skip if we've already added a task for this path
+            if (addedPaths.has(worktree.path)) continue
+            
+            const status = repo.status ? repo.status.find(s => s.path === worktree.path) : null
+            const taskName = this.getTaskNameFromBranch(worktree.branch) || worktree.branch
+            
+            tasks.push({
+              name: taskName,
+              path: worktree.path,
+              repository: repo.name || this.getTaskNameFromPath(repo.path),
+              repositoryPath: repo.path,
+              status: status ? status.status : 'unknown',
+              last_activity: status ? status.last_activity : null,
+              last_message: status ? status.last_message : null,
+              full_last_message: status ? status.full_last_message : null,
+              session_id: status ? status.session_id : null,
+              isMainCheckout: worktree.path === repo.path,
+              hasHooks: hookStatus.is_installed,
+              repoId: repo.id
+            })
+            addedPaths.add(worktree.path)
+          }
+        }
+        
+        // Only add main checkout task if not already added as a worktree
+        if (!addedPaths.has(repo.path)) {
+          const mainStatus = repo.status ? repo.status.find(s => s.path === repo.path) : null
+          if (mainStatus || !repo.worktrees || repo.worktrees.length === 0) {
+            const mainTaskName = this.getTaskNameFromPath(repo.path) || repo.name || 'main'
+            
+            const mainTask = {
+              name: mainTaskName,
+              path: repo.path,
+              repository: repo.name || this.getTaskNameFromPath(repo.path),
+              repositoryPath: repo.path,
+              status: mainStatus ? mainStatus.status : 'unknown',
+              last_activity: mainStatus ? mainStatus.last_activity : null,
+              last_message: mainStatus ? mainStatus.last_message : null,
+              full_last_message: mainStatus ? mainStatus.full_last_message : null,
+              session_id: mainStatus ? mainStatus.session_id : null,
+              isMainCheckout: true,
+              hasHooks: hookStatus.is_installed,
+              repoId: repo.id
             }
+            tasks.push(mainTask)
           }
         }
       }
       
-      // Sort by most recent activity
-      return waiting.sort((a, b) => new Date(b.last_activity) - new Date(a.last_activity))
+      return tasks
+    },
+
+    waitingTasks() {
+      return this.allTasks
+        .filter(task => task.status === 'waiting')
+        .sort((a, b) => new Date(b.last_activity || 0) - new Date(a.last_activity || 0))
+    },
+
+    otherTasks() {
+      return this.allTasks
+        .filter(task => task.status !== 'waiting')
+        .sort((a, b) => new Date(b.last_activity || 0) - new Date(a.last_activity || 0))
     }
   },
   methods: {
@@ -421,58 +531,11 @@ export default {
       }
     },
     
-    getWorktreeStatus(worktree) {
-      // Find status for this worktree from the repository's status array
-      if (!this.repositories) return 'unknown'
-      
-      const repo = this.repositories.find(r => 
-        r.worktrees && r.worktrees.some(wt => wt.path === worktree.path)
-      )
-      
-      if (repo && repo.status) {
-        const status = repo.status.find(s => s.path === worktree.path)
-        return status ? status.status : 'unknown'
-      }
-      
-      return 'unknown'
-    },
-    
-    getWorktreeLastMessage(worktree) {
-      // Find last message for this worktree from the repository's status array
-      if (!this.repositories) return ''
-      
-      const repo = this.repositories.find(r => 
-        r.worktrees && r.worktrees.some(wt => wt.path === worktree.path)
-      )
-      
-      if (repo && repo.status) {
-        const status = repo.status.find(s => s.path === worktree.path)
-        return status ? status.last_message || '' : ''
-      }
-      
-      return ''
-    },
 
-    getWorktreeFullLastMessage(worktree) {
-      // Find full last message for this worktree from the repository's status array
-      if (!this.repositories) return ''
-      
-      const repo = this.repositories.find(r => 
-        r.worktrees && r.worktrees.some(wt => wt.path === worktree.path)
-      )
-      
-      if (repo && repo.status) {
-        const status = repo.status.find(s => s.path === worktree.path)
-        return status ? status.full_last_message || '' : ''
-      }
-      
-      return ''
-    },
-
-    toggleMessageExpansion(worktreePath) {
+    toggleMessageExpansion(taskPath) {
       this.expandedMessages = {
         ...this.expandedMessages,
-        [worktreePath]: !this.expandedMessages[worktreePath]
+        [taskPath]: !this.expandedMessages[taskPath]
       }
     },
 
@@ -564,6 +627,15 @@ export default {
       }
     },
 
+    async loadBinaryPath() {
+      try {
+        const response = await apiClient.getBinaryPath()
+        this.binaryPath = response.path
+      } catch (error) {
+        console.error('Failed to load binary path:', error)
+      }
+    },
+
     setupSSE() {
       // Connect to Server-Sent Events
       apiClient.connectSSE()
@@ -614,6 +686,58 @@ export default {
     formatTimestamp(timestamp) {
       const date = new Date(timestamp)
       return date.toLocaleTimeString()
+    },
+
+    getTaskNameFromPath(path) {
+      // Extract task name from the repository path
+      // For example: /home/user/projects/my-task -> "my-task"
+      const parts = path.split('/')
+      return parts[parts.length - 1]
+    },
+
+    getTaskNameFromBranch(branch) {
+      // Extract task name from branch name
+      // For example: "feature/user-auth" -> "user-auth"
+      //              "bugfix/login-issue" -> "login-issue"
+      //              "task/dashboard-rewrite" -> "dashboard-rewrite"
+      if (branch.includes('/')) {
+        const parts = branch.split('/')
+        return parts.slice(1).join('/')
+      }
+      return branch
+    },
+
+    showMinionCommand(task) {
+      this.selectedTask = task
+      this.showMinionDialog = true
+    },
+
+    closeMinionDialog() {
+      this.showMinionDialog = false
+      this.selectedTask = null
+    },
+
+    getMinionCommand(task) {
+      if (!task || !this.binaryPath) return ''
+      
+      // Generate the command to run the current binary in minion mode
+      // No need to change directory since current directory is fine
+      return `${this.binaryPath} --minion claude`
+    },
+
+    async copyCommand() {
+      if (!this.selectedTask) return
+      
+      const command = this.getMinionCommand(this.selectedTask)
+      try {
+        await navigator.clipboard.writeText(command)
+        // Could add a temporary "Copied!" notification here
+      } catch (error) {
+        console.error('Failed to copy command:', error)
+        // Fallback for older browsers
+        this.$refs.commandText.select()
+        document.execCommand('copy')
+      }
     }
   }
 }
@@ -663,17 +787,21 @@ export default {
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
-.waiting-agents {
+.waiting-tasks {
   border-left: 4px solid #007bff;
 }
 
-.waiting-list {
+.other-tasks {
+  border-left: 4px solid #6c757d;
+}
+
+.task-list {
   display: flex;
   flex-direction: column;
   gap: 1rem;
 }
 
-.waiting-item {
+.task-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -683,40 +811,41 @@ export default {
   background: #f8f9fa;
 }
 
-.waiting-info {
+.task-info {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
 }
 
-.waiting-path {
+.task-name {
   font-weight: bold;
-  font-family: monospace;
   color: #333;
   font-size: 1.1rem;
 }
 
-.waiting-details {
+.task-details {
   display: flex;
   gap: 1rem;
   font-size: 0.9rem;
   color: #666;
+  align-items: center;
 }
 
-.waiting-session {
+.task-repo {
   font-family: monospace;
   background: #e9ecef;
   padding: 0.2rem 0.4rem;
   border-radius: 3px;
 }
 
-.waiting-time {
+
+.task-time {
   color: #007bff;
   font-weight: 500;
 }
 
-.waiting-message {
+.task-message {
   font-family: monospace;
   color: #495057;
   font-size: 0.9rem;
@@ -729,13 +858,22 @@ export default {
   border-left: 3px solid #007bff;
 }
 
-.waiting-message:hover {
+.task-message:hover {
   background: #f1f3f4;
 }
 
-.waiting-actions {
+.task-actions {
   display: flex;
   gap: 0.5rem;
+  align-items: center;
+}
+
+.task-status {
+  padding: 0.25rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: bold;
+  text-transform: uppercase;
 }
 
 .add-repository h2 {
@@ -768,69 +906,6 @@ export default {
 
 .add-btn:hover {
   background: #0056b3;
-}
-
-.repositories h2 {
-  margin-bottom: 1rem;
-  color: #333;
-}
-
-.repository-card {
-  background: white;
-  border-radius: 8px;
-  margin-bottom: 1.5rem;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-  overflow: hidden;
-}
-
-.repo-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1.5rem;
-  background: #f8f9fa;
-  border-bottom: 1px solid #e0e0e0;
-}
-
-.repo-info h3 {
-  color: #333;
-  font-family: monospace;
-  margin: 0;
-}
-
-.repo-actions {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.hook-status {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.hook-not-installed {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.hook-indicator {
-  font-size: 0.9rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: 12px;
-  font-weight: bold;
-}
-
-.hook-indicator.installed {
-  background: #d4edda;
-  color: #155724;
-}
-
-.hook-indicator.not-installed {
-  background: #f8d7da;
-  color: #721c24;
 }
 
 .install-hook-btn {
@@ -871,88 +946,46 @@ export default {
   background: #c82333;
 }
 
-.worktrees {
-  padding: 1rem;
-}
-
-.worktree-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem;
-  border: 1px solid #e0e0e0;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
-}
-
-.worktree-info {
-  display: flex;
-  gap: 1rem;
-  align-items: center;
-  flex: 1;
-}
-
-.branch-name {
-  font-weight: bold;
-  color: #333;
-}
-
-.worktree-path {
-  font-family: monospace;
-  color: #666;
-  font-size: 0.9rem;
-}
-
-.status {
-  padding: 0.25rem 0.5rem;
-  border-radius: 12px;
-  font-size: 0.8rem;
-  font-weight: bold;
-  text-transform: uppercase;
-}
-
-.status.running {
+.task-status.running {
   background: #d4edda;
   color: #155724;
 }
 
-.status.waiting {
+.task-status.waiting {
   background: #cce5ff;
   color: #004085;
 }
 
-.status.idle {
+.task-status.idle {
   background: #fff3cd;
   color: #856404;
 }
 
-.status.paused {
+.task-status.paused {
   background: #f8d7da;
   color: #721c24;
 }
 
-.status.unknown {
+.task-status.unknown {
   background: #e9ecef;
   color: #6c757d;
 }
 
-.last-message {
-  font-family: monospace;
-  color: #495057;
-  font-size: 0.8rem;
-  background: #f8f9fa;
-  padding: 0.25rem 0.5rem;
+.minion-btn {
+  padding: 0.5rem 1rem;
+  background: #6f42c1;
+  color: white;
+  border: none;
   border-radius: 4px;
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   cursor: pointer;
-  transition: background-color 0.2s;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
-.last-message:hover {
-  background: #e9ecef;
+.minion-btn:hover {
+  background: #5a32a3;
 }
 
 .expanded-message {
@@ -1042,19 +1075,6 @@ export default {
   background: #c82333;
 }
 
-.repo-path {
-  font-family: monospace;
-  font-size: 0.9rem;
-  color: #666;
-  margin-left: 0.5rem;
-}
-
-.no-worktrees {
-  padding: 1rem;
-  text-align: center;
-  color: #666;
-  font-style: italic;
-}
 
 .input-container {
   position: relative;
@@ -1344,5 +1364,121 @@ export default {
 .action-type.type-file_operation {
   background: #e2d3f3;
   color: #6f42c1;
+}
+
+/* Dialog Styles */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.dialog {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow: auto;
+}
+
+.dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.dialog-header h3 {
+  margin: 0;
+  color: #333;
+  font-size: 1.2rem;
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: #666;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.dialog-close:hover {
+  background: #f5f5f5;
+  color: #333;
+}
+
+.dialog-content {
+  padding: 1.5rem;
+}
+
+.dialog-description {
+  margin-bottom: 1rem;
+  color: #555;
+  line-height: 1.5;
+}
+
+.command-container {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  align-items: stretch;
+}
+
+.command-text {
+  flex: 1;
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  padding: 1rem;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: #333;
+  word-break: break-all;
+  display: block;
+}
+
+.copy-btn {
+  padding: 1rem;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.copy-btn:hover {
+  background: #0056b3;
+}
+
+.dialog-note {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #f8f9fa;
+  border-radius: 4px;
+  color: #666;
+  font-size: 0.9rem;
+  line-height: 1.4;
 }
 </style>

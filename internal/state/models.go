@@ -17,20 +17,25 @@ type Worktree struct {
 }
 
 type AgentStatus struct {
-	Path            string    `json:"path"`
-	Status          string    `json:"status"` // running, idle, paused, error
-	LastActivity    time.Time `json:"last_activity"`
-	PID             int       `json:"pid,omitempty"`
-	SessionID       string    `json:"session_id,omitempty"`
-	TranscriptPath  string    `json:"transcript_path,omitempty"`
-	LastMessage     string    `json:"last_message,omitempty"`
-	FullLastMessage string    `json:"full_last_message,omitempty"`
+	Path           string    `json:"path"`
+	Status         string    `json:"status"` // running, idle, paused, error
+	LastActivity   time.Time `json:"last_activity"`
+	PID            int       `json:"pid,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
+	TranscriptPath string    `json:"transcript_path,omitempty"`
+}
+
+// AgentStatusWithMessages is used for API responses that include last messages from memory
+type AgentStatusWithMessages struct {
+	AgentStatus
+	LastMessage     string `json:"last_message,omitempty"`
+	FullLastMessage string `json:"full_last_message,omitempty"`
 }
 
 type RepositoryWithWorktrees struct {
 	Repository
-	Worktrees []Worktree    `json:"worktrees"`
-	Status    []AgentStatus `json:"status"`
+	Worktrees []Worktree                `json:"worktrees"`
+	Status    []AgentStatusWithMessages `json:"status"`
 }
 
 type MinionMessage struct {

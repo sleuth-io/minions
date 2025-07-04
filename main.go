@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -48,23 +47,29 @@ func main() {
 	}
 	fmt.Printf("Config directory: %s\n", configDir)
 
-	// Initialize state manager
-	stateManager, err := state.NewManager(configDir)
-	if err != nil {
-		log.Fatal("Failed to initialize state manager:", err)
-	}
-
-	// Initialize git manager
-	gitManager := git.NewManager()
-
 	if *hookMode {
-		// Hook mode - execute webhook notification and exit
+		// Hook mode - lightweight initialization without watchers
+		stateManager, err := state.NewManager(configDir, true)
+		if err != nil {
+			log.Fatal("Failed to initialize state manager:", err)
+		}
+		defer stateManager.Close()
+
 		if err := handleHookMode(stateManager); err != nil {
 			log.Printf("Hook mode error: %v", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
 	}
+
+	// Initialize state manager (with watchers for web mode)
+	stateManager, err := state.NewManager(configDir, false)
+	if err != nil {
+		log.Fatal("Failed to initialize state manager:", err)
+	}
+
+	// Initialize git manager
+	gitManager := git.NewManager()
 
 	// Web mode - start the server
 	server := api.NewServer(stateManager, gitManager)
@@ -90,10 +95,23 @@ type HookData struct {
 }
 
 func handleHookMode(stateManager *state.Manager) error {
-	// Read hook data from stdin
+	// Read raw JSON data from stdin first for debugging
+	rawData, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to read stdin: %w", err)
+	}
+
+	// Write raw input JSON to /tmp for debugging
+	timestamp := time.Now().Format("20060102-150405.000")
+	debugFile := fmt.Sprintf("/tmp/claude-hook-raw-%s.json", timestamp)
+	if err := os.WriteFile(debugFile, rawData, 0644); err != nil {
+		// Log error but continue - debugging shouldn't break functionality
+		log.Printf("Warning: failed to write debug file %s: %v", debugFile, err)
+	}
+
+	// Parse the raw JSON data
 	var hookData HookData
-	decoder := json.NewDecoder(os.Stdin)
-	if err := decoder.Decode(&hookData); err != nil {
+	if err := json.Unmarshal(rawData, &hookData); err != nil {
 		return fmt.Errorf("failed to decode hook data: %w", err)
 	}
 
@@ -107,7 +125,7 @@ func handleHookMode(stateManager *state.Manager) error {
 	logFile := "/tmp/claude-hook-debug.log"
 	if f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		defer f.Close()
-		debugMsg := fmt.Sprintf("[%s] Hook data - SessionID: %s, TranscriptPath: %s, ToolName: %s, ToolInput: %v, ToolOutput: %v\n", 
+		debugMsg := fmt.Sprintf("[%s] Hook data - SessionID: %s, TranscriptPath: %s, ToolName: %s, ToolInput: %v, ToolOutput: %v\n",
 			time.Now().Format("2006-01-02 15:04:05"), hookData.SessionID, hookData.TranscriptPath, hookData.ToolName, hookData.ToolInput != nil, hookData.ToolOutput != nil)
 		f.WriteString(debugMsg)
 	}
@@ -128,24 +146,26 @@ func handleHookMode(stateManager *state.Manager) error {
 			if isWaitingForUser(hookData.TranscriptPath) {
 				event = "Notification"
 			} else {
-				event = "Stop"
+				// If we have session info but not waiting for user, assume running
+				// This captures other events that provide session info
+				event = "Running"
 			}
 		} else {
 			event = "Stop" // Default for minimal data
 		}
 	}
-	
+
 	// Debug: Log the event determination
 	if f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		defer f.Close()
-		debugMsg := fmt.Sprintf("[%s] Determined event type: %s -> status: %s\n", 
+		debugMsg := fmt.Sprintf("[%s] Determined event type: %s -> status: %s\n",
 			time.Now().Format("2006-01-02 15:04:05"), event, determineStatusFromEvent(event, hookData.ToolName))
 		f.WriteString(debugMsg)
 	}
 
 	// Update agent status based on hook event
 	status := determineStatusFromEvent(event, hookData.ToolName)
-	
+
 	// Special handling: ignore Stop events that come shortly after Notification events
 	if event == "Stop" {
 		if shouldIgnoreStop(stateManager, workingDir) {
@@ -162,12 +182,12 @@ func handleHookMode(stateManager *state.Manager) error {
 	}
 
 	agentStatus := state.AgentStatus{
-		Path:           workingDir,
-		Status:         status,
-		LastActivity:   time.Now(),
-		PID:            os.Getpid(),
-		SessionID:      hookData.SessionID,
-		TranscriptPath: hookData.TranscriptPath,
+		Path:         workingDir,
+		Status:       status,
+		LastActivity: time.Now(),
+		PID:          os.Getpid(),
+		// Don't store session_id and transcript_path from hooks since they're unreliable
+		// The server will auto-discover the latest transcript file
 	}
 
 	// Load existing statuses
@@ -180,13 +200,6 @@ func handleHookMode(stateManager *state.Manager) error {
 	found := false
 	for i, s := range statuses {
 		if s.Path == workingDir {
-			// Preserve existing session info if not provided in current hook
-			if agentStatus.SessionID == "" {
-				agentStatus.SessionID = s.SessionID
-			}
-			if agentStatus.TranscriptPath == "" {
-				agentStatus.TranscriptPath = s.TranscriptPath
-			}
 			statuses[i] = agentStatus
 			found = true
 			break
@@ -201,25 +214,7 @@ func handleHookMode(stateManager *state.Manager) error {
 		return fmt.Errorf("failed to save agent status: %w", err)
 	}
 
-	// Extract and store last message from transcript if available
-	if hookData.SessionID != "" && hookData.TranscriptPath != "" {
-		lastMessage, fullMessage := extractLastMessageFromTranscript(hookData.TranscriptPath)
-		if lastMessage != "" {
-			// Update the agent status with the extracted message
-			for i, s := range statuses {
-				if s.Path == workingDir {
-					statuses[i].LastMessage = lastMessage
-					statuses[i].FullLastMessage = fullMessage
-					break
-				}
-			}
-			
-			// Save the updated statuses with the new message
-			if err := stateManager.SaveAgentStatus(statuses); err != nil {
-				fmt.Printf("Warning: failed to save updated agent status with message: %v\n", err)
-			}
-		}
-	}
+	// Note: Removed session info update - the server will auto-discover transcript files
 
 	fmt.Printf("Updated agent status: %s -> %s\n", workingDir, status)
 	return nil
@@ -231,109 +226,17 @@ func determineStatusFromEvent(event, _ string) string {
 		return "running"
 	case "PostToolUse":
 		return "running"
+	case "Running":
+		return "running"
 	case "Notification":
 		return "waiting"
 	case "Stop":
 		return "idle"
 	default:
-		return "unknown"
+		// For any other events that provide session info, set to running
+		// This ensures we capture session_id and transcript_path for all events
+		return "running"
 	}
-}
-
-func extractLastMessageFromTranscript(transcriptPath string) (string, string) {
-	file, err := os.Open(transcriptPath)
-	if err != nil {
-		return "", ""
-	}
-	defer file.Close()
-	
-	var lastUserMessage, lastAssistantMessage string
-	scanner := bufio.NewScanner(file)
-	
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		
-		// Check if this entry has a message field (Claude Code transcript format)
-		if message, ok := entry["message"].(map[string]interface{}); ok {
-			if role, ok := message["role"].(string); ok && (role == "user" || role == "assistant") {
-				var content string
-				
-				if role == "user" {
-					// User messages have content as string
-					if userContent, ok := message["content"].(string); ok {
-						content = userContent
-					}
-				} else if role == "assistant" {
-					// Assistant messages have content as array of objects
-					if contentArray, ok := message["content"].([]interface{}); ok {
-						var textParts []string
-						for _, item := range contentArray {
-							if contentObj, ok := item.(map[string]interface{}); ok {
-								if contentType, ok := contentObj["type"].(string); ok && contentType == "text" {
-									if text, ok := contentObj["text"].(string); ok {
-										textParts = append(textParts, text)
-									}
-								}
-							}
-						}
-						content = strings.Join(textParts, " ")
-					}
-				}
-				
-				if content != "" {
-					// Clean content by removing tool calls
-					cleanContent := cleanMessageContent(content)
-					if cleanContent != "" {
-						if role == "assistant" {
-							lastAssistantMessage = cleanContent
-						} else if role == "user" {
-							lastUserMessage = cleanContent
-						}
-					}
-				}
-			}
-		}
-	}
-	
-	// Prefer assistant messages over user messages
-	fullMessage := lastAssistantMessage
-	if fullMessage == "" {
-		fullMessage = lastUserMessage
-	}
-	
-	// Create truncated version for display
-	truncatedMessage := fullMessage
-	if len(truncatedMessage) > 200 {
-		truncatedMessage = truncatedMessage[:200] + "..."
-	}
-	
-	return truncatedMessage, fullMessage
-}
-
-func cleanMessageContent(content string) string {
-	// Remove tool call blocks
-	re := regexp.MustCompile(`(?s)<function_calls>.*?</function_calls>`)
-	content = re.ReplaceAllString(content, "")
-	
-	// Clean up whitespace
-	lines := strings.Split(content, "\n")
-	var cleanLines []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			cleanLines = append(cleanLines, trimmed)
-		}
-	}
-	
-	return strings.TrimSpace(strings.Join(cleanLines, " "))
 }
 
 func isWaitingForUser(transcriptPath string) bool {
@@ -342,41 +245,41 @@ func isWaitingForUser(transcriptPath string) bool {
 		return false
 	}
 	defer file.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	var lastEntry map[string]interface{}
-	
+
 	// Find the last entry in the transcript
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		
+
 		var entry map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
 		lastEntry = entry
 	}
-	
+
 	if lastEntry == nil {
 		return false
 	}
-	
+
 	// Check if the last entry indicates we're waiting for user input
 	// This typically happens after an assistant message
 	if entryType, ok := lastEntry["type"].(string); ok && entryType == "assistant" {
 		return true
 	}
-	
+
 	// Also check if there's a message with assistant role
 	if message, ok := lastEntry["message"].(map[string]interface{}); ok {
 		if role, ok := message["role"].(string); ok && role == "assistant" {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -385,7 +288,7 @@ func shouldIgnoreStop(stateManager *state.Manager, workingDir string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	for _, status := range statuses {
 		if status.Path == workingDir {
 			// If current status is "running" or "waiting" and was updated recently (within 10 seconds), ignore the stop
@@ -396,7 +299,7 @@ func shouldIgnoreStop(stateManager *state.Manager, workingDir string) bool {
 			break
 		}
 	}
-	
+
 	return false
 }
 
@@ -410,7 +313,7 @@ func handleMinionMode() error {
 		// Fallback to discard if debug file can't be created
 		log.SetOutput(io.Discard)
 	}
-	
+
 	// Get command arguments (everything after the --minion flag)
 	args := flag.Args()
 	if len(args) == 0 {
@@ -429,7 +332,7 @@ func handleMinionMode() error {
 		return fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	stateManager, err := state.NewManager(configDir)
+	stateManager, err := state.NewManager(configDir, true)
 	if err != nil {
 		return fmt.Errorf("failed to initialize state manager: %w", err)
 	}
@@ -441,10 +344,10 @@ func handleMinionMode() error {
 	// Check if stdin is available (not a terminal or has data)
 	stat, err := os.Stdin.Stat()
 	stdinIsTerminal := err != nil || (stat.Mode()&os.ModeCharDevice) != 0
-	
+
 	var stdinPipe io.WriteCloser
 	var ptyMaster *os.File
-	
+
 	if stdinIsTerminal {
 		// For terminal mode, create a pty so we can inject messages
 		ptyMaster, err = pty.Start(cmd)
@@ -452,25 +355,25 @@ func handleMinionMode() error {
 			return fmt.Errorf("failed to create pty: %w", err)
 		}
 		defer ptyMaster.Close()
-		
+
 		// Set the pty size to match the current terminal
 		if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
 			pty.Setsize(ptyMaster, ws)
 		}
-		
+
 		// Put the real terminal in raw mode to properly forward key sequences
 		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("failed to set terminal to raw mode: %w", err)
 		}
 		defer term.Restore(int(os.Stdin.Fd()), oldState)
-		
+
 		// Forward pty output to real stdout/stderr
 		go io.Copy(os.Stdout, ptyMaster)
-		
+
 		// Forward real stdin to pty (in background)
 		go io.Copy(ptyMaster, os.Stdin)
-		
+
 		// Use ptyMaster as our message injection point
 		stdinPipe = ptyMaster
 	} else {
@@ -479,7 +382,7 @@ func handleMinionMode() error {
 		if err != nil {
 			return fmt.Errorf("failed to create stdin pipe: %w", err)
 		}
-		
+
 		// Connect stdout and stderr directly for transparency
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -491,9 +394,9 @@ func handleMinionMode() error {
 			return fmt.Errorf("failed to start command: %w", err)
 		}
 	}
-	
+
 	// Don't manipulate stdin in terminal mode
-	
+
 	// Debug: log that process started
 	if debugFile, err := os.OpenFile("/tmp/minion-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		debugFile.WriteString(fmt.Sprintf("[%s] Started process: %s (PID: %d)\n", time.Now().Format("15:04:05"), args[0], cmd.Process.Pid))
@@ -507,7 +410,7 @@ func handleMinionMode() error {
 	stopTicker := make(chan bool)
 	var processRunning bool = true
 	var processRunningMutex sync.RWMutex
-	
+
 	// Copy from os.Stdin to the command's stdin in a goroutine
 	go func() {
 		defer close(stdinDone)
@@ -522,7 +425,7 @@ func handleMinionMode() error {
 	messageTicker := time.NewTicker(500 * time.Millisecond)
 	go func() {
 		defer messageTicker.Stop()
-		
+
 		// Create debug log file
 		var debugLog *os.File
 		debugLog, err := os.OpenFile("/tmp/minion-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -532,7 +435,7 @@ func handleMinionMode() error {
 			debugLog.WriteString(fmt.Sprintf("[%s] Config dir: %s\n", time.Now().Format("15:04:05"), configDir))
 			debugLog.WriteString(fmt.Sprintf("[%s] Entering message polling loop\n", time.Now().Format("15:04:05")))
 		}
-		
+
 		for {
 			select {
 			case <-messageTicker.C:
@@ -544,24 +447,24 @@ func handleMinionMode() error {
 					}
 					continue
 				}
-				
+
 				if message != nil {
 					if debugLog != nil {
 						debugLog.WriteString(fmt.Sprintf("[%s] Found message: %s\n", time.Now().Format("15:04:05"), message.Message))
 					}
-					
+
 					// Check if process is still running before writing to stdin
 					processRunningMutex.RLock()
 					running := processRunning
 					processRunningMutex.RUnlock()
-					
+
 					if !running {
 						if debugLog != nil {
 							debugLog.WriteString(fmt.Sprintf("[%s] Process not running, discarding message\n", time.Now().Format("15:04:05")))
 						}
 						continue
 					}
-					
+
 					// Send message to child process stdin (only if we have a pipe)
 					if stdinPipe != nil {
 						// Send the message character by character, then Enter
@@ -620,7 +523,7 @@ func handleMinionMode() error {
 		processRunningMutex.Lock()
 		processRunning = false
 		processRunningMutex.Unlock()
-		
+
 		// Stop the message ticker first
 		close(stopTicker)
 		// Give ticker time to stop
@@ -635,7 +538,7 @@ func handleMinionMode() error {
 			processRunningMutex.Lock()
 			processRunning = false
 			processRunningMutex.Unlock()
-			
+
 			// Stop the message ticker first
 			close(stopTicker)
 			// Give ticker time to stop
@@ -652,7 +555,7 @@ func handleMinionMode() error {
 			processRunningMutex.Lock()
 			processRunning = false
 			processRunningMutex.Unlock()
-			
+
 			// Stop ticker and close the pipe to signal EOF to subprocess
 			close(stopTicker)
 			time.Sleep(50 * time.Millisecond)
@@ -661,7 +564,7 @@ func handleMinionMode() error {
 			err = <-processExit
 		}
 	}
-	
+
 	if err != nil {
 		// Exit with the same exit code as the child process
 		if exitError, ok := err.(*exec.ExitError); ok {

@@ -99,6 +99,11 @@ class ApiClient {
     return this.request('/system-commands')
   }
 
+  // Binary path
+  async getBinaryPath() {
+    return this.request('/binary-path')
+  }
+
   // Server-Sent Events methods
   connectSSE() {
     if (this.eventSource && this.eventSource.readyState === EventSource.OPEN) {
